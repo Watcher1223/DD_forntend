@@ -7,6 +7,14 @@ import DiceDisplay from '@/components/DiceDisplay';
 import MusicMood from '@/components/MusicMood';
 import ActionBar from '@/components/ActionBar';
 import EventLog from '@/components/EventLog';
+import type {
+  HealthResponse,
+  ActionResponse,
+  CampaignResponse,
+  DiceResponse,
+  StoryUpdateMessage,
+  CampaignEvent,
+} from '@/lib/api-types';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4300';
 
@@ -21,7 +29,9 @@ interface GameEvent {
 
 interface GameState {
   narration: string;
+  narrationAudioUrl: string | null;
   sceneImage: string | null;
+  imageSource: 'nanobanana' | 'imagen' | 'placeholder' | null;
   diceValue: number | null;
   musicMood: string;
   musicUrl: string | null;
@@ -29,13 +39,19 @@ interface GameState {
   isProcessing: boolean;
   isRolling: boolean;
   events: GameEvent[];
-  turnCount: number;
+  eventNumber: number;
+  health: HealthResponse | null;
+  error: string | null;
+  /** Set when narration ends so MusicMood starts playing (after user gesture). */
+  musicPlayRequest: number | null;
 }
 
 export default function HomePage() {
   const [game, setGame] = useState<GameState>({
     narration: '',
+    narrationAudioUrl: null,
     sceneImage: null,
+    imageSource: null,
     diceValue: null,
     musicMood: 'tavern',
     musicUrl: null,
@@ -43,14 +59,17 @@ export default function HomePage() {
     isProcessing: false,
     isRolling: false,
     events: [],
-    turnCount: 0,
+    eventNumber: 0,
+    health: null,
+    error: null,
+    musicPlayRequest: null,
   });
 
   const wsRef = useRef<WebSocket | null>(null);
 
-  // ── WebSocket connection ──
+  // ── WebSocket connection (real-time story_update broadcasts) ──
   useEffect(() => {
-    const wsUrl = API_BASE.replace(/^http/, 'ws') + '/ws';
+    const wsUrl = API_BASE.replace(/^http/, 'ws');
     let ws: WebSocket;
     let reconnectTimer: NodeJS.Timeout;
 
@@ -63,9 +82,9 @@ export default function HomePage() {
 
       ws.onmessage = (evt) => {
         try {
-          const data = JSON.parse(evt.data);
-          if (data.type === 'game_update') {
-            applyUpdate(data.payload);
+          const data = JSON.parse(evt.data) as StoryUpdateMessage;
+          if (data.type === 'story_update') {
+            applyStoryUpdate(data);
           }
         } catch {
           // ignore parse errors
@@ -92,51 +111,94 @@ export default function HomePage() {
     };
   }, []);
 
-  // ── Load campaign on mount ──
+  // ── Health check on load ──
+  useEffect(() => {
+    fetch(`${API_BASE}/api/health`)
+      .then((r) => r.json())
+      .then((data: HealthResponse) => {
+        setGame((prev) => ({ ...prev, health: data, error: null }));
+      })
+      .catch(() => {
+        setGame((prev) => ({
+          ...prev,
+          health: {
+            status: 'error',
+            service: 'living-worlds',
+            campaign_events: 0,
+            has_gemini: false,
+            has_nanobanana: false,
+            has_lyria: false,
+          },
+          error: 'Cannot reach the Dungeon Master. Is the backend running?',
+        }));
+      });
+  }, []);
+
+  // ── Load campaign on mount (persisted state) ──
   useEffect(() => {
     fetch(`${API_BASE}/api/campaign`)
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.events?.length > 0) {
-          const lastEvt = data.events[data.events.length - 1];
+      .then((r) => {
+        if (!r.ok) throw new Error('Campaign not found');
+        return r.json();
+      })
+      .then((data: CampaignResponse) => {
+        const events: GameEvent[] = (data.recentEvents || []).map((e: CampaignEvent) => ({
+          action: e.action,
+          diceRoll: e.diceRoll ?? null,
+          narration: e.narration,
+          music_mood: e.music_mood,
+          location: e.location,
+          timestamp: e.timestamp ?? Date.now(),
+        }));
+        if (events.length > 0) {
+          const last = events[events.length - 1];
           setGame((prev) => ({
             ...prev,
-            events: data.events,
-            turnCount: data.turnCount || data.events.length,
-            narration: lastEvt.narration || prev.narration,
-            location: lastEvt.location || prev.location,
-            musicMood: lastEvt.music_mood || prev.musicMood,
+            events,
+            eventNumber: data.eventCount ?? events.length,
+            narration: last.narration || prev.narration,
+            location: last.location || prev.location,
+            musicMood: last.music_mood || prev.musicMood,
           }));
         }
       })
       .catch(() => {
-        // Backend not running yet — that's fine
+        // Backend not running or no campaign — that's fine
       });
   }, []);
 
-  const applyUpdate = (payload: any) => {
+  const applyStoryUpdate = (data: ActionResponse | StoryUpdateMessage) => {
+    const imageUrl = data.image?.imageUrl ?? null;
+    const imageSource = data.image?.source ?? null;
+    const musicUrl = data.music?.audioUrl ?? null;
+    const musicMood = data.music?.mood ?? data.music_mood ?? '';
     setGame((prev) => ({
       ...prev,
-      narration: payload.narration ?? prev.narration,
-      sceneImage: payload.image_url ?? prev.sceneImage,
-      diceValue: payload.dice_roll ?? prev.diceValue,
-      musicMood: payload.music_mood ?? prev.musicMood,
-      musicUrl: payload.music_url ?? prev.musicUrl,
-      location: payload.location ?? prev.location,
+      narration: data.narration ?? prev.narration,
+      narrationAudioUrl: data.narrationAudioUrl ?? prev.narrationAudioUrl,
+      sceneImage: imageUrl ?? prev.sceneImage,
+      imageSource: imageSource ?? prev.imageSource,
+      diceValue: data.diceRoll ?? prev.diceValue,
+      musicMood: musicMood || prev.musicMood,
+      musicUrl: musicUrl ?? prev.musicUrl,
+      location: data.location ?? prev.location,
       isProcessing: false,
       isRolling: false,
-      turnCount: prev.turnCount + 1,
-      events: [
-        ...prev.events,
-        {
-          action: payload.action || '???',
-          diceRoll: payload.dice_roll || null,
-          narration: payload.narration || '',
-          music_mood: payload.music_mood || prev.musicMood,
-          location: payload.location || prev.location,
-          timestamp: Date.now(),
-        },
-      ],
+      eventNumber: data.event_number ?? prev.eventNumber,
+      events:
+        prev.events.length > 0 && prev.events[prev.events.length - 1].narration === data.narration
+          ? prev.events
+          : [
+              ...prev.events,
+              {
+                action: (data as any).action || '???',
+                diceRoll: data.diceRoll ?? null,
+                narration: data.narration || '',
+                music_mood: musicMood || prev.musicMood,
+                location: data.location || prev.location,
+                timestamp: Date.now(),
+              },
+            ],
     }));
   };
 
@@ -147,30 +209,28 @@ export default function HomePage() {
         ...prev,
         isProcessing: true,
         isRolling: diceRoll !== null || webcamFrame !== null,
+        error: null,
       }));
 
-      // If webcam frame provided, detect dice first
       let finalDiceRoll = diceRoll;
-      if (webcamFrame && !diceRoll) {
+      if (webcamFrame && diceRoll == null) {
         try {
           const diceRes = await fetch(`${API_BASE}/api/dice`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ frame: webcamFrame }),
+            body: JSON.stringify({ webcamFrame }),
           });
-          const diceData = await diceRes.json();
+          const diceData = (await diceRes.json()) as DiceResponse;
           finalDiceRoll = diceData.value;
         } catch {
           finalDiceRoll = Math.floor(Math.random() * 20) + 1;
         }
       }
 
-      // Show the dice value immediately
       if (finalDiceRoll !== null) {
         setGame((prev) => ({ ...prev, diceValue: finalDiceRoll, isRolling: false }));
       }
 
-      // Send the action to the backend
       try {
         const res = await fetch(`${API_BASE}/api/action`, {
           method: 'POST',
@@ -178,43 +238,69 @@ export default function HomePage() {
           body: JSON.stringify({
             action,
             diceRoll: finalDiceRoll,
-            webcamFrame: webcamFrame,
+            webcamFrame: webcamFrame ?? undefined,
           }),
         });
 
-        const data = await res.json();
+        const data = (await res.json()) as ActionResponse & { error?: string; details?: string };
 
-        // Apply the response (WebSocket may also deliver it, but we apply directly for reliability)
-        setGame((prev) => ({
-          ...prev,
-          narration: data.narration || prev.narration,
-          sceneImage: data.image_url || prev.sceneImage,
-          diceValue: data.dice_roll ?? finalDiceRoll ?? prev.diceValue,
-          musicMood: data.music_mood || prev.musicMood,
-          musicUrl: data.music_url || prev.musicUrl,
-          location: data.location || prev.location,
-          isProcessing: false,
-          isRolling: false,
-          turnCount: prev.turnCount + 1,
-          events: [
-            ...prev.events,
-            {
-              action,
-              diceRoll: data.dice_roll ?? finalDiceRoll,
-              narration: data.narration || '',
-              music_mood: data.music_mood || prev.musicMood,
-              location: data.location || prev.location,
-              timestamp: Date.now(),
-            },
-          ],
-        }));
+        if (!res.ok) {
+          const msg =
+            res.status === 400
+              ? data.error || 'Action is required.'
+              : res.status === 404
+                ? data.error || 'Campaign not found.'
+                : data.error || data.details || 'Something went wrong.';
+          setGame((prev) => ({
+            ...prev,
+            isProcessing: false,
+            isRolling: false,
+            error: msg,
+          }));
+          return;
+        }
+
+        const payload: ActionResponse = {
+          narration: data.narration,
+          narrationAudioUrl: data.narrationAudioUrl,
+          diceRoll: data.diceRoll ?? finalDiceRoll ?? null,
+          image: data.image,
+          music: data.music,
+          location: data.location,
+          music_mood: data.music_mood,
+          elapsed_ms: data.elapsed_ms,
+          event_number: data.event_number,
+        };
+        applyStoryUpdate({
+          ...payload,
+          type: 'story_update',
+          action,
+        });
+
+        // Play narration then music (in same user-gesture chain per backend docs).
+        // First playback must follow a user action; we're in the callback from "Act" click.
+        const narrationUrl = payload.narrationAudioUrl;
+        const musicUrlToPlay = payload.music?.audioUrl;
+        if (narrationUrl || musicUrlToPlay) {
+          if (narrationUrl && musicUrlToPlay) {
+            const narrationAudio = new Audio(narrationUrl);
+            narrationAudio.onended = () => {
+              setGame((prev) => ({ ...prev, musicPlayRequest: Date.now() }));
+            };
+            narrationAudio.play().catch((e) => console.error('[Living Worlds] Narration play failed:', e));
+          } else if (narrationUrl) {
+            new Audio(narrationUrl).play().catch((e) => console.error('[Living Worlds] Narration play failed:', e));
+          } else if (musicUrlToPlay) {
+            setGame((prev) => ({ ...prev, musicPlayRequest: Date.now() }));
+          }
+        }
       } catch (err) {
         console.error('[Living Worlds] Action failed:', err);
         setGame((prev) => ({
           ...prev,
           isProcessing: false,
           isRolling: false,
-          narration: 'The magical connection wavers... The Dungeon Master is unreachable. Check that the backend server is running.',
+          error: 'The Dungeon Master is unreachable. Check that the backend is running.',
         }));
       }
     },
@@ -224,9 +310,12 @@ export default function HomePage() {
   const handleReset = async () => {
     try {
       await fetch(`${API_BASE}/api/campaign/reset`, { method: 'POST' });
-      setGame({
+      setGame((prev) => ({
+        ...prev,
         narration: '',
+        narrationAudioUrl: null,
         sceneImage: null,
+        imageSource: null,
         diceValue: null,
         musicMood: 'tavern',
         musicUrl: null,
@@ -234,8 +323,10 @@ export default function HomePage() {
         isProcessing: false,
         isRolling: false,
         events: [],
-        turnCount: 0,
-      });
+        eventNumber: 0,
+        error: null,
+        musicPlayRequest: null,
+      }));
     } catch {
       // ignore
     }
@@ -257,10 +348,22 @@ export default function HomePage() {
           </p>
           <div className="flex items-center justify-center gap-4 mt-2">
             <div className="h-px w-16 bg-gold/20" />
-            <span className="text-gold/30 text-xs font-mono">Turn {game.turnCount}</span>
+            <span className="text-gold/30 text-xs font-mono">Event {game.eventNumber}</span>
             <div className="h-px w-16 bg-gold/20" />
           </div>
         </header>
+
+        {/* Health / demo mode / errors */}
+        {game.health && !game.health.has_gemini && (
+          <div className="rounded-lg bg-amber-900/20 border border-amber-600/30 px-4 py-2 text-center text-amber-200/90 text-sm">
+            Demo mode — connect API for full AI narration.
+          </div>
+        )}
+        {game.error && (
+          <div className="rounded-lg bg-red-900/20 border border-red-600/30 px-4 py-2 text-center text-red-200 text-sm">
+            {game.error}
+          </div>
+        )}
 
         {/* Main grid */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -268,15 +371,21 @@ export default function HomePage() {
           <div className="lg:col-span-2">
             <SceneArtwork
               imageUrl={game.sceneImage}
+              imageSource={game.imageSource}
               isLoading={game.isProcessing}
-              eventNumber={game.turnCount}
+              eventNumber={game.eventNumber}
             />
           </div>
 
           {/* Right column — Dice + Music */}
           <div className="flex flex-col gap-4">
             <DiceDisplay value={game.diceValue} isRolling={game.isRolling} />
-            <MusicMood mood={game.musicMood} audioUrl={game.musicUrl} />
+            <MusicMood
+              mood={game.musicMood}
+              audioUrl={game.musicUrl}
+              hasLyria={game.health?.has_lyria ?? true}
+              musicPlayRequest={game.musicPlayRequest}
+            />
           </div>
         </div>
 
@@ -284,6 +393,7 @@ export default function HomePage() {
         <NarrationBox
           text={game.narration}
           location={game.location}
+          narrationAudioUrl={game.narrationAudioUrl}
           isLoading={game.isProcessing}
         />
 
@@ -297,6 +407,15 @@ export default function HomePage() {
         <div className="flex items-center justify-between pt-2">
           <span className="text-parchment/20 text-[10px] font-mono">
             Powered by Gemini 3.1 + NanoBanana 2 + Lyria
+            {' · '}
+            <a
+              href={`${API_BASE}/test-audio.html`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-gold/40 hover:text-gold transition-colors"
+            >
+              Test audio
+            </a>
           </span>
           <button
             onClick={handleReset}

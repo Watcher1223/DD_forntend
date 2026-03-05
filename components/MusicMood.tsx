@@ -5,6 +5,9 @@ import { useEffect, useRef, useState } from 'react';
 interface MusicMoodProps {
   mood: string;
   audioUrl: string | null;
+  hasLyria?: boolean;
+  /** When set (e.g. after narration ends), start playing. Avoids autoplay block. */
+  musicPlayRequest?: number | null;
 }
 
 const MOOD_ICONS: Record<string, string> = {
@@ -29,37 +32,41 @@ const MOOD_COLORS: Record<string, string> = {
   epic: 'from-gold/20 to-gold/5 border-gold/30',
 };
 
-export default function MusicMood({ mood, audioUrl }: MusicMoodProps) {
+export default function MusicMood({ mood, audioUrl, hasLyria = true, musicPlayRequest }: MusicMoodProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [volume, setVolume] = useState(0.3);
+  const musicUnavailable = !hasLyria;
+  const lastPlayRequestRef = useRef<number | null>(null);
 
+  // Update audio source when URL changes (do not auto-play — browser may block).
   useEffect(() => {
     if (!audioUrl) return;
-
-    // Crossfade: fade out old, start new
     if (audioRef.current) {
       audioRef.current.pause();
     }
-
     const audio = new Audio(audioUrl);
     audio.loop = true;
     audio.volume = volume;
     audioRef.current = audio;
-
-    // Auto-play requires user interaction first — try it
-    audio.play().then(() => {
-      setIsPlaying(true);
-    }).catch(() => {
-      // Browser blocked auto-play, user will need to click
-      setIsPlaying(false);
-    });
-
+    lastPlayRequestRef.current = null; // allow next musicPlayRequest to start this track
     return () => {
       audio.pause();
       audio.src = '';
     };
   }, [audioUrl]);
+
+  // When parent requests play (e.g. after narration ends), play once per request.
+  useEffect(() => {
+    if (!musicPlayRequest || !audioUrl || musicUnavailable) return;
+    if (lastPlayRequestRef.current === musicPlayRequest) return;
+    lastPlayRequestRef.current = musicPlayRequest;
+    const audio = audioRef.current;
+    if (audio) {
+      audio.volume = volume;
+      audio.play().then(() => setIsPlaying(true)).catch(() => {});
+    }
+  }, [musicPlayRequest, audioUrl, musicUnavailable, volume]);
 
   useEffect(() => {
     if (audioRef.current) audioRef.current.volume = volume;
@@ -80,7 +87,10 @@ export default function MusicMood({ mood, audioUrl }: MusicMoodProps) {
   return (
     <div className={`flex flex-col items-center justify-center bg-gradient-to-b ${colors} backdrop-blur-sm border rounded-xl p-4 shadow-xl transition-all duration-700`}>
       <span className="font-display text-gold/40 text-[10px] tracking-[0.3em] uppercase mb-2">Soundtrack</span>
-
+      {musicUnavailable ? (
+        <p className="text-parchment/50 text-xs italic">Music unavailable</p>
+      ) : (
+        <>
       <div className="flex items-center gap-3">
         <span className="text-2xl mood-pulse">{MOOD_ICONS[mood] || '🎵'}</span>
         <div>
@@ -107,6 +117,8 @@ export default function MusicMood({ mood, audioUrl }: MusicMoodProps) {
           onChange={(e) => setVolume(parseFloat(e.target.value))}
           className="w-full mt-3 h-1 accent-gold/60 bg-gold/10 rounded-full appearance-none cursor-pointer"
         />
+      )}
+        </>
       )}
     </div>
   );

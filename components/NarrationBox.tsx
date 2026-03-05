@@ -1,16 +1,19 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 
 interface NarrationBoxProps {
   text: string;
   location: string;
+  narrationAudioUrl?: string | null;
   isLoading: boolean;
 }
 
-export default function NarrationBox({ text, location, isLoading }: NarrationBoxProps) {
+export default function NarrationBox({ text, location, narrationAudioUrl, isLoading }: NarrationBoxProps) {
   const [displayText, setDisplayText] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  const [isPlayingAudio, setIsPlayingAudio] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   // Typewriter effect
   useEffect(() => {
@@ -31,6 +34,19 @@ export default function NarrationBox({ text, location, isLoading }: NarrationBox
 
     return () => clearInterval(timer);
   }, [text]);
+
+  const playNarration = () => {
+    if (!narrationAudioUrl) return;
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = '';
+    }
+    const audio = new Audio(narrationAudioUrl);
+    audioRef.current = audio;
+    setIsPlayingAudio(true);
+    audio.play().catch(() => setIsPlayingAudio(false));
+    audio.onended = () => setIsPlayingAudio(false);
+  };
 
   return (
     <div className="relative bg-[#12121f]/80 backdrop-blur-sm border border-gold/10 rounded-xl p-6 shadow-xl">
@@ -58,6 +74,17 @@ export default function NarrationBox({ text, location, isLoading }: NarrationBox
           <p className="text-parchment text-lg leading-relaxed font-body italic">
             &ldquo;{displayText}&rdquo;
             {isTyping && <span className="inline-block w-[2px] h-5 bg-gold ml-1 animate-pulse" />}
+            {narrationAudioUrl && (
+              <button
+                type="button"
+                onClick={playNarration}
+                disabled={isTyping || isPlayingAudio}
+                className="ml-3 text-gold/60 hover:text-gold text-sm font-mono disabled:opacity-50"
+                title="Hear narration"
+              >
+                {isPlayingAudio ? '🔊 Playing…' : '▶ Hear'}
+              </button>
+            )}
           </p>
         ) : (
           <p className="text-parchment/30 text-lg font-body italic">

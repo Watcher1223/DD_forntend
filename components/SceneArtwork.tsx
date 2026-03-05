@@ -4,11 +4,12 @@ import { useState } from 'react';
 
 interface SceneArtworkProps {
   imageUrl: string | null;
+  imageSource?: 'nanobanana' | 'imagen' | 'placeholder' | null;
   isLoading: boolean;
   eventNumber: number;
 }
 
-export default function SceneArtwork({ imageUrl, isLoading, eventNumber }: SceneArtworkProps) {
+export default function SceneArtwork({ imageUrl, imageSource, isLoading, eventNumber }: SceneArtworkProps) {
   const [imgLoaded, setImgLoaded] = useState(false);
 
   return (
@@ -46,10 +47,24 @@ export default function SceneArtwork({ imageUrl, isLoading, eventNumber }: Scene
       {/* Cinematic overlay gradient */}
       <div className="absolute inset-0 bg-gradient-to-t from-[#0a0a12] via-transparent to-transparent pointer-events-none" />
 
-      {/* Event counter */}
-      {eventNumber > 0 && (
-        <div className="absolute top-3 right-3 bg-black/60 backdrop-blur-sm px-3 py-1 rounded-full border border-gold/20">
-          <span className="text-gold/80 text-xs font-mono">Scene {eventNumber}</span>
+      {/* Event counter + image source label */}
+      {(eventNumber > 0 || imageSource) && (
+        <div className="absolute top-3 right-3 flex items-center gap-2">
+          {imageSource === 'placeholder' && (
+            <span className="bg-black/60 backdrop-blur-sm px-2 py-1 rounded border border-gold/20 text-gold/60 text-[10px] font-mono uppercase">
+              Preview
+            </span>
+          )}
+          {imageSource && imageSource !== 'placeholder' && (
+            <span className="bg-black/60 backdrop-blur-sm px-2 py-1 rounded border border-gold/20 text-gold/80 text-[10px] font-mono uppercase">
+              AI
+            </span>
+          )}
+          {eventNumber > 0 && (
+            <span className="bg-black/60 backdrop-blur-sm px-3 py-1 rounded-full border border-gold/20 text-gold/80 text-xs font-mono">
+              Scene {eventNumber}
+            </span>
+          )}
         </div>
       )}
     </div>
