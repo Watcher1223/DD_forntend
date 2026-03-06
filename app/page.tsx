@@ -31,7 +31,7 @@ interface GameState {
   narration: string;
   narrationAudioUrl: string | null;
   sceneImage: string | null;
-  imageSource: 'nanobanana' | 'imagen' | 'placeholder' | null;
+  imageSource: 'nanobanana' | 'imagen' | null;
   diceValue: number | null;
   musicMood: string;
   musicUrl: string | null;
@@ -250,7 +250,11 @@ export default function HomePage() {
               ? data.error || 'Action is required.'
               : res.status === 404
                 ? data.error || 'Campaign not found.'
-                : data.error || data.details || 'Something went wrong.';
+                : res.status === 502
+                  ? data.error || data.details || 'Music unavailable. Lyria may need configuration.'
+                  : res.status === 503
+                    ? data.details || data.error || 'Story, image, or music requires API configuration (Gemini, NanoBanana/Imagen, or Lyria).'
+                    : data.error || data.details || 'Something went wrong.';
           setGame((prev) => ({
             ...prev,
             isProcessing: false,
@@ -353,10 +357,15 @@ export default function HomePage() {
           </div>
         </header>
 
-        {/* Health / demo mode / errors */}
+        {/* Health / config / errors */}
         {game.health && !game.health.has_gemini && (
           <div className="rounded-lg bg-amber-900/20 border border-amber-600/30 px-4 py-2 text-center text-amber-200/90 text-sm">
-            Demo mode — connect API for full AI narration.
+            Configure Gemini API — actions will return 503 until GEMINI_API_KEY is set.
+          </div>
+        )}
+        {game.health && !game.health.has_lyria && (
+          <div className="rounded-lg bg-amber-900/15 border border-amber-600/20 px-4 py-1.5 text-center text-amber-200/70 text-xs">
+            Music unavailable until GOOGLE_CLOUD_PROJECT and billing are configured.
           </div>
         )}
         {game.error && (
@@ -398,7 +407,11 @@ export default function HomePage() {
         />
 
         {/* Action bar */}
-        <ActionBar onAction={handleAction} isProcessing={game.isProcessing} />
+        <ActionBar
+          onAction={handleAction}
+          isProcessing={game.isProcessing}
+          actionDisabled={game.health !== null && !game.health.has_gemini}
+        />
 
         {/* Event log */}
         <EventLog events={game.events} />

@@ -4,7 +4,7 @@ import { useState } from 'react';
 
 interface SceneArtworkProps {
   imageUrl: string | null;
-  imageSource?: 'nanobanana' | 'imagen' | 'placeholder' | null;
+  imageSource?: 'nanobanana' | 'imagen' | null;
   isLoading: boolean;
   eventNumber: number;
 }
@@ -50,12 +50,7 @@ export default function SceneArtwork({ imageUrl, imageSource, isLoading, eventNu
       {/* Event counter + image source label */}
       {(eventNumber > 0 || imageSource) && (
         <div className="absolute top-3 right-3 flex items-center gap-2">
-          {imageSource === 'placeholder' && (
-            <span className="bg-black/60 backdrop-blur-sm px-2 py-1 rounded border border-gold/20 text-gold/60 text-[10px] font-mono uppercase">
-              Preview
-            </span>
-          )}
-          {imageSource && imageSource !== 'placeholder' && (
+          {imageSource && (
             <span className="bg-black/60 backdrop-blur-sm px-2 py-1 rounded border border-gold/20 text-gold/80 text-[10px] font-mono uppercase">
               AI
             </span>

@@ -5,9 +5,11 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 interface ActionBarProps {
   onAction: (action: string, diceRoll: number | null, webcamFrame: string | null) => void;
   isProcessing: boolean;
+  /** When true (e.g. Gemini not configured), actions return 503 — disable sending. */
+  actionDisabled?: boolean;
 }
 
-export default function ActionBar({ onAction, isProcessing }: ActionBarProps) {
+export default function ActionBar({ onAction, isProcessing, actionDisabled = false }: ActionBarProps) {
   const [textInput, setTextInput] = useState('');
   const [isListening, setIsListening] = useState(false);
   const [showWebcam, setShowWebcam] = useState(false);
@@ -106,7 +108,7 @@ export default function ActionBar({ onAction, isProcessing }: ActionBarProps) {
 
   const handleSubmit = (overrideAction?: string) => {
     const action = overrideAction || textInput.trim();
-    if (!action || isProcessing) return;
+    if (!action || isProcessing || actionDisabled) return;
     onAction(action, null, null);
     setTextInput('');
   };
@@ -137,12 +139,12 @@ export default function ActionBar({ onAction, isProcessing }: ActionBarProps) {
           onChange={(e) => setTextInput(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
           placeholder='Describe your action... "I sneak past the guard"'
-          disabled={isProcessing}
+          disabled={isProcessing || actionDisabled}
           className="flex-1 bg-[#12121f] border border-gold/20 rounded-xl px-4 py-3 text-parchment placeholder:text-parchment/20 font-body text-base focus:outline-none focus:border-gold/50 focus:shadow-[0_0_20px_rgba(201,169,110,0.1)] transition-all disabled:opacity-50"
         />
         <button
           onClick={() => handleSubmit()}
-          disabled={isProcessing || !textInput.trim()}
+          disabled={isProcessing || actionDisabled || !textInput.trim()}
           className="bg-gold/10 hover:bg-gold/20 border border-gold/30 rounded-xl px-5 py-3 font-display text-gold text-sm tracking-wider transition-all disabled:opacity-30 disabled:cursor-not-allowed hover:shadow-[0_0_20px_rgba(201,169,110,0.15)]"
         >
           {isProcessing ? (
@@ -158,7 +160,7 @@ export default function ActionBar({ onAction, isProcessing }: ActionBarProps) {
         {/* Mic button */}
         <button
           onClick={isListening ? stopListening : startListening}
-          disabled={isProcessing}
+          disabled={isProcessing || actionDisabled}
           className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl border font-display text-sm tracking-wider transition-all ${
             isListening
               ? 'bg-red-900/30 border-red-500/50 text-red-400 animate-pulse shadow-[0_0_20px_rgba(239,68,68,0.2)]'
@@ -172,7 +174,7 @@ export default function ActionBar({ onAction, isProcessing }: ActionBarProps) {
         {/* Roll dice button (quick simulated) */}
         <button
           onClick={handleQuickRoll}
-          disabled={isProcessing}
+          disabled={isProcessing || actionDisabled}
           className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl border bg-[#12121f] border-gold/20 text-gold/70 hover:bg-gold/5 hover:border-gold/30 font-display text-sm tracking-wider transition-all disabled:opacity-30"
         >
           <span className="text-lg">🎲</span>
@@ -182,7 +184,7 @@ export default function ActionBar({ onAction, isProcessing }: ActionBarProps) {
         {/* Webcam dice button */}
         <button
           onClick={showWebcam ? () => handleDiceRoll(captureFrame()) : startWebcam}
-          disabled={isProcessing}
+          disabled={isProcessing || actionDisabled}
           className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl border font-display text-sm tracking-wider transition-all disabled:opacity-30 ${
             showWebcam
               ? 'bg-emerald-900/30 border-emerald-500/50 text-emerald-400'

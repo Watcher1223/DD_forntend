@@ -13,14 +13,14 @@ export interface HealthResponse {
 
 export interface ActionImage {
   imageUrl: string;
-  source: 'nanobanana' | 'imagen' | 'placeholder';
+  source: 'nanobanana' | 'imagen';
 }
 
 export interface ActionMusic {
   audioUrl: string;
   mood: string;
   description?: string;
-  source: 'lyria' | 'preset';
+  source: 'lyria';
 }
 
 export interface ActionResponse {
