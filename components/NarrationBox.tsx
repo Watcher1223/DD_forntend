@@ -88,7 +88,7 @@ export default function NarrationBox({ text, location, narrationAudioUrl, isLoad
           </p>
         ) : (
           <p className="text-parchment/30 text-lg font-body italic">
-            The torchlight flickers in the tavern. Your adventure awaits...
+            Enter an action to begin…
           </p>
         )}
       </div>

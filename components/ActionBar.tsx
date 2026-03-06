@@ -76,7 +76,7 @@ export default function ActionBar({ onAction, isProcessing, actionDisabled = fal
       setShowWebcam(true);
     } catch (err) {
       console.error('Webcam error:', err);
-      // Fall back to simulated roll
+      // Send action without dice; backend can return a roll in the response
       handleDiceRoll(null);
     }
   };
@@ -114,9 +114,8 @@ export default function ActionBar({ onAction, isProcessing, actionDisabled = fal
   };
 
   const handleQuickRoll = () => {
-    const roll = Math.floor(Math.random() * 20) + 1;
     const action = textInput.trim() || 'I act on instinct';
-    onAction(action, roll, null);
+    onAction(action, null, null);
     setTextInput('');
   };
 
@@ -171,7 +170,7 @@ export default function ActionBar({ onAction, isProcessing, actionDisabled = fal
           {isListening ? 'Listening...' : 'Speak Action'}
         </button>
 
-        {/* Roll dice button (quick simulated) */}
+        {/* Roll d20 (backend returns roll in action response) */}
         <button
           onClick={handleQuickRoll}
           disabled={isProcessing || actionDisabled}

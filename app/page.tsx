@@ -121,14 +121,6 @@ export default function HomePage() {
       .catch(() => {
         setGame((prev) => ({
           ...prev,
-          health: {
-            status: 'error',
-            service: 'living-worlds',
-            campaign_events: 0,
-            has_gemini: false,
-            has_nanobanana: false,
-            has_lyria: false,
-          },
           error: 'Cannot reach the Dungeon Master. Is the backend running?',
         }));
       });
@@ -223,7 +215,8 @@ export default function HomePage() {
           const diceData = (await diceRes.json()) as DiceResponse;
           finalDiceRoll = diceData.value;
         } catch {
-          finalDiceRoll = Math.floor(Math.random() * 20) + 1;
+          // Leave null; backend will not have a dice value from this request
+          finalDiceRoll = null;
         }
       }
 
