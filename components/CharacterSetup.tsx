@@ -260,7 +260,7 @@ export default function CharacterSetup({
           <div className="h-px w-12 bg-gold/20" />
           <span className="text-parchment/30 text-xs tracking-[0.2em] uppercase font-mono">
             {phase === 'loading' && 'Loading...'}
-            {phase === 'prompt' && 'Personalize your adventure'}
+            {phase === 'prompt' && 'Personalize your story'}
             {phase === 'camera' && 'Position yourself in frame'}
             {phase === 'capturing' && `Capturing frame ${frameProgress} of ${FRAME_COUNT}...`}
             {phase === 'analyzing' && 'Gemini is analyzing...'}
@@ -361,8 +361,8 @@ function PromptPhase({
     <div className="text-center space-y-6 py-4 animate-fade-in">
       <p className="text-parchment/70 font-body text-lg leading-relaxed max-w-md mx-auto">
         {hasSubjectCustomization
-          ? 'Scan your face so you become the hero of the story. Your likeness will appear in every scene.'
-          : 'Enable your camera so the Dungeon Master can see you. Your appearance will be woven into the story and artwork.'}
+          ?           'Scan your face so you become the hero of tonight\'s story. Your likeness will appear in every scene.'
+          : 'Enable your camera so we can see our storyteller. Your appearance will be woven into the bedtime tale and artwork.'}
       </p>
       <div className="flex flex-wrap justify-center gap-4">
         <button
@@ -480,7 +480,7 @@ function AnalyzingPhase() {
         <div className="w-10 h-10 border-2 border-gold/30 border-t-gold rounded-full animate-spin" />
       </div>
       <p className="text-parchment/50 font-body text-base">
-        The Dungeon Master studies your appearance...
+        Studying your appearance for the story...
       </p>
     </div>
   );
@@ -637,7 +637,7 @@ function ResultsPhase({
     <div className="space-y-5 animate-fade-in">
       {isReturning && (
         <p className="text-center text-parchment/50 font-body text-base">
-          The Dungeon Master still remembers you from last time.
+          We still remember you from last time.
         </p>
       )}
 
@@ -661,7 +661,7 @@ function ResultsPhase({
           onClick={onStart}
           className="bg-gold/10 hover:bg-gold/20 border border-gold/40 rounded-xl px-6 py-3 font-display text-gold text-sm tracking-wider transition-all hover:shadow-[0_0_20px_rgba(201,169,110,0.15)]"
         >
-          {isReturning ? 'Continue Adventure' : 'Start Adventure'}
+          {isReturning ? 'Continue Story' : 'Continue'}
         </button>
         <button
           onClick={onRecapture}

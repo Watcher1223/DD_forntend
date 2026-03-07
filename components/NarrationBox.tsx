@@ -68,7 +68,7 @@ export default function NarrationBox({ text, location, narrationAudioUrl, isLoad
               <div className="w-2 h-2 rounded-full bg-gold/40 animate-bounce" style={{ animationDelay: '150ms' }} />
               <div className="w-2 h-2 rounded-full bg-gold/40 animate-bounce" style={{ animationDelay: '300ms' }} />
             </div>
-            <span className="text-gold/40 italic text-sm">The Dungeon Master speaks...</span>
+            <span className="text-gold/40 italic text-sm">The story begins...</span>
           </div>
         ) : displayText ? (
           <p className="text-parchment text-lg leading-relaxed font-body italic">

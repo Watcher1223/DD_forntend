@@ -2,8 +2,8 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Living Worlds — AI Dungeon Master',
-  description: 'Real-time AI Dungeon Master that narrates, draws, and scores a fantasy world',
+  title: 'The Magical Bedtime Adventure',
+  description: 'AI-powered bedtime story generator with personalized images, narration, and music',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
