@@ -9,6 +9,7 @@ export interface HealthResponse {
   has_gemini: boolean;
   has_nanobanana: boolean;
   has_lyria: boolean;
+  has_vision: boolean;
 }
 
 export interface ActionImage {
@@ -59,3 +60,32 @@ export interface DiceResponse {
 }
 
 export type StoryUpdateMessage = { type: 'story_update' } & ActionResponse;
+
+// ── Camera / Character Profiling ──
+
+export interface CharacterAppearance {
+  label: string;
+  hair: string;
+  clothing: string;
+  features: string;
+  age_range: string;
+}
+
+/** Response from POST /api/camera/analyze */
+export interface CameraAnalyzeResponse {
+  people: CharacterAppearance[];
+  setting: string;
+  stored: number;
+  elapsed_ms: number;
+}
+
+export interface CameraProfile {
+  label: string;
+  appearance: CharacterAppearance;
+  updated_at: number;
+}
+
+/** Response from GET /api/camera/profiles */
+export interface CameraProfilesResponse {
+  profiles: CameraProfile[];
+}

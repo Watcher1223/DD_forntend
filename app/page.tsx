@@ -7,6 +7,7 @@ import DiceDisplay from '@/components/DiceDisplay';
 import MusicMood from '@/components/MusicMood';
 import ActionBar from '@/components/ActionBar';
 import EventLog from '@/components/EventLog';
+import CharacterSetup from '@/components/CharacterSetup';
 import type {
   HealthResponse,
   ActionResponse,
@@ -44,6 +45,7 @@ interface GameState {
   error: string | null;
   /** Set when narration ends so MusicMood starts playing (after user gesture). */
   musicPlayRequest: number | null;
+  showCharacterSetup: boolean;
 }
 
 export default function HomePage() {
@@ -63,6 +65,7 @@ export default function HomePage() {
     health: null,
     error: null,
     musicPlayRequest: null,
+    showCharacterSetup: true,
   });
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -116,7 +119,12 @@ export default function HomePage() {
     fetch(`${API_BASE}/api/health`)
       .then((r) => r.json())
       .then((data: HealthResponse) => {
-        setGame((prev) => ({ ...prev, health: data, error: null }));
+        setGame((prev) => ({
+          ...prev,
+          health: data,
+          error: null,
+          showCharacterSetup: data.has_vision ? prev.showCharacterSetup : false,
+        }));
       })
       .catch(() => {
         setGame((prev) => ({
@@ -323,6 +331,7 @@ export default function HomePage() {
         eventNumber: 0,
         error: null,
         musicPlayRequest: null,
+        showCharacterSetup: true,
       }));
     } catch {
       // ignore
@@ -350,64 +359,81 @@ export default function HomePage() {
           </div>
         </header>
 
-        {/* Health / config / errors */}
-        {game.health && !game.health.has_gemini && (
-          <div className="rounded-lg bg-amber-900/20 border border-amber-600/30 px-4 py-2 text-center text-amber-200/90 text-sm">
-            Configure Gemini API — actions will return 503 until GEMINI_API_KEY is set.
+        {/* Character setup gate — shown before the game when vision is available */}
+        {game.showCharacterSetup && game.health === null && !game.error ? (
+          <div className="flex justify-center py-16">
+            <div className="w-8 h-8 border-2 border-gold/30 border-t-gold rounded-full animate-spin" />
           </div>
-        )}
-        {game.health && !game.health.has_lyria && (
-          <div className="rounded-lg bg-amber-900/15 border border-amber-600/20 px-4 py-1.5 text-center text-amber-200/70 text-xs">
-            Music unavailable until GOOGLE_CLOUD_PROJECT and billing are configured.
-          </div>
-        )}
-        {game.error && (
-          <div className="rounded-lg bg-red-900/20 border border-red-600/30 px-4 py-2 text-center text-red-200 text-sm">
-            {game.error}
-          </div>
-        )}
+        ) : game.showCharacterSetup && game.health?.has_vision ? (
+          <CharacterSetup
+            hasVision
+            onComplete={() =>
+              setGame((prev) => ({ ...prev, showCharacterSetup: false }))
+            }
+            onSkip={() => setGame((prev) => ({ ...prev, showCharacterSetup: false }))}
+          />
+        ) : (
+          <>
+            {/* Health / config / errors */}
+            {game.health && !game.health.has_gemini && (
+              <div className="rounded-lg bg-amber-900/20 border border-amber-600/30 px-4 py-2 text-center text-amber-200/90 text-sm">
+                Configure Gemini API — actions will return 503 until GEMINI_API_KEY is set.
+              </div>
+            )}
+            {game.health && !game.health.has_lyria && (
+              <div className="rounded-lg bg-amber-900/15 border border-amber-600/20 px-4 py-1.5 text-center text-amber-200/70 text-xs">
+                Music unavailable until GOOGLE_CLOUD_PROJECT and billing are configured.
+              </div>
+            )}
+            {game.error && (
+              <div className="rounded-lg bg-red-900/20 border border-red-600/30 px-4 py-2 text-center text-red-200 text-sm">
+                {game.error}
+              </div>
+            )}
 
-        {/* Main grid */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          {/* Left column — Scene artwork */}
-          <div className="lg:col-span-2">
-            <SceneArtwork
-              imageUrl={game.sceneImage}
-              imageSource={game.imageSource}
+            {/* Main grid */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+              {/* Left column — Scene artwork */}
+              <div className="lg:col-span-2">
+                <SceneArtwork
+                  imageUrl={game.sceneImage}
+                  imageSource={game.imageSource}
+                  isLoading={game.isProcessing}
+                  eventNumber={game.eventNumber}
+                />
+              </div>
+
+              {/* Right column — Dice + Music */}
+              <div className="flex flex-col gap-4">
+                <DiceDisplay value={game.diceValue} isRolling={game.isRolling} />
+                <MusicMood
+                  mood={game.musicMood}
+                  audioUrl={game.musicUrl}
+                  hasLyria={game.health?.has_lyria ?? true}
+                  musicPlayRequest={game.musicPlayRequest}
+                />
+              </div>
+            </div>
+
+            {/* Narration */}
+            <NarrationBox
+              text={game.narration}
+              location={game.location}
+              narrationAudioUrl={game.narrationAudioUrl}
               isLoading={game.isProcessing}
-              eventNumber={game.eventNumber}
             />
-          </div>
 
-          {/* Right column — Dice + Music */}
-          <div className="flex flex-col gap-4">
-            <DiceDisplay value={game.diceValue} isRolling={game.isRolling} />
-            <MusicMood
-              mood={game.musicMood}
-              audioUrl={game.musicUrl}
-              hasLyria={game.health?.has_lyria ?? true}
-              musicPlayRequest={game.musicPlayRequest}
+            {/* Action bar */}
+            <ActionBar
+              onAction={handleAction}
+              isProcessing={game.isProcessing}
+              actionDisabled={game.health !== null && !game.health.has_gemini}
             />
-          </div>
-        </div>
 
-        {/* Narration */}
-        <NarrationBox
-          text={game.narration}
-          location={game.location}
-          narrationAudioUrl={game.narrationAudioUrl}
-          isLoading={game.isProcessing}
-        />
-
-        {/* Action bar */}
-        <ActionBar
-          onAction={handleAction}
-          isProcessing={game.isProcessing}
-          actionDisabled={game.health !== null && !game.health.has_gemini}
-        />
-
-        {/* Event log */}
-        <EventLog events={game.events} />
+            {/* Event log */}
+            <EventLog events={game.events} />
+          </>
+        )}
 
         {/* Footer controls */}
         <div className="flex items-center justify-between pt-2">
