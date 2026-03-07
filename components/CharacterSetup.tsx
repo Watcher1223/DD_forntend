@@ -13,21 +13,27 @@ import type {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4300';
 
-type Phase = 'loading' | 'prompt' | 'camera' | 'analyzing' | 'pairing' | 'results';
+type Phase = 'loading' | 'prompt' | 'camera' | 'capturing' | 'analyzing' | 'pairing' | 'results';
+
+const FRAME_COUNT = 3;
+const FRAME_DELAY_MS = 1500;
 
 interface CharacterSetupProps {
   hasVision: boolean;
+  hasSubjectCustomization?: boolean;
   campaignId?: number;
   onComplete: (profiles: CameraProfile[]) => void;
   onSkip: () => void;
 }
 
 /**
- * Pre-game camera flow: captures a webcam frame, sends it to Gemini Vision
- * for character appearance analysis, and shows results before the game begins.
+ * Pre-game camera flow: captures webcam frames, sends them to Gemini Vision
+ * for character appearance analysis, and stores reference frames for
+ * personalized image generation (Imagen 3 Subject Customization).
  */
 export default function CharacterSetup({
   hasVision,
+  hasSubjectCustomization = false,
   campaignId,
   onComplete,
   onSkip,
@@ -37,6 +43,7 @@ export default function CharacterSetup({
   const [setting, setSetting] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [isReturning, setIsReturning] = useState(false);
+  const [frameProgress, setFrameProgress] = useState(0);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -77,7 +84,7 @@ export default function CharacterSetup({
     setError(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 1280, height: 720 },
+        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
       });
       streamRef.current = stream;
       setPhase('camera');
@@ -106,33 +113,44 @@ export default function CharacterSetup({
     return () => stopCamera();
   }, []);
 
-  // ── Capture & analyze ──
+  // ── Capture & analyze (multi-frame) ──
 
+  /** Sends a single frame to the backend and returns the analysis response. */
+  async function sendFrame(frame: string): Promise<CameraAnalyzeResponse> {
+    const res = await fetch(`${API_BASE}/api/camera/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ frame, campaignId }),
+    });
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(
+        (body as any).details || (body as any).error || `Server error (${res.status})`
+      );
+    }
+
+    return (await res.json()) as CameraAnalyzeResponse;
+  }
+
+  /**
+   * Captures multiple frames with a short delay between each for better
+   * likeness matching. Each frame is sent to /api/camera/analyze which
+   * stores it as a reference for Imagen 3 Subject Customization.
+   */
   async function captureAndAnalyze() {
-    const frame = captureFrame();
-    if (!frame) {
+    const firstFrame = captureFrame();
+    if (!firstFrame) {
       setError('Could not capture frame. Please try again.');
       return;
     }
 
-    setPhase('analyzing');
+    setPhase('capturing');
+    setFrameProgress(1);
     setError(null);
 
     try {
-      const res = await fetch(`${API_BASE}/api/camera/analyze`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ frame, campaignId }),
-      });
-
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(
-          (body as any).details || (body as any).error || `Server error (${res.status})`
-        );
-      }
-
-      const data = (await res.json()) as CameraAnalyzeResponse;
+      const data = await sendFrame(firstFrame);
 
       if (data.people.length === 0) {
         setError(
@@ -142,9 +160,24 @@ export default function CharacterSetup({
         return;
       }
 
+      let latestData = data;
+
+      for (let i = 2; i <= FRAME_COUNT; i++) {
+        await new Promise((r) => setTimeout(r, FRAME_DELAY_MS));
+        const frame = captureFrame();
+        if (!frame) break;
+        setFrameProgress(i);
+        try {
+          latestData = await sendFrame(frame);
+        } catch {
+          // Non-fatal: first frame already stored, continue with what we have
+          break;
+        }
+      }
+
       stopCamera();
-      setPeople(data.people);
-      setSetting(data.setting);
+      setPeople(latestData.people);
+      setSetting(latestData.setting);
       setIsReturning(false);
       setPhase('results');
     } catch (err: any) {
@@ -219,7 +252,9 @@ export default function CharacterSetup({
         <h2 className="font-display text-gold text-2xl tracking-[0.12em] uppercase">
           {isReturning && phase === 'results'
             ? 'Welcome Back'
-            : 'Character Scan'}
+            : hasSubjectCustomization
+              ? "Let's See Our Hero"
+              : 'Character Scan'}
         </h2>
         <div className="flex items-center justify-center gap-3 mt-2">
           <div className="h-px w-12 bg-gold/20" />
@@ -227,6 +262,7 @@ export default function CharacterSetup({
             {phase === 'loading' && 'Loading...'}
             {phase === 'prompt' && 'Personalize your adventure'}
             {phase === 'camera' && 'Position yourself in frame'}
+            {phase === 'capturing' && `Capturing frame ${frameProgress} of ${FRAME_COUNT}...`}
             {phase === 'analyzing' && 'Gemini is analyzing...'}
             {phase === 'pairing' && 'Waiting for phone capture...'}
             {phase === 'results' && `${people.length} character${people.length !== 1 ? 's' : ''} detected`}
@@ -251,7 +287,12 @@ export default function CharacterSetup({
 
       {/* Phase: prompt */}
       {phase === 'prompt' && (
-        <PromptPhase onCapture={startCamera} onPhonePair={startPairing} onSkip={onSkip} />
+        <PromptPhase
+          onCapture={startCamera}
+          onPhonePair={startPairing}
+          onSkip={onSkip}
+          hasSubjectCustomization={hasSubjectCustomization}
+        />
       )}
 
       {/* Phase: camera */}
@@ -260,6 +301,15 @@ export default function CharacterSetup({
           videoRef={videoRef}
           onAnalyze={captureAndAnalyze}
           onCancel={() => { stopCamera(); setPhase('prompt'); }}
+        />
+      )}
+
+      {/* Phase: capturing (multi-frame) */}
+      {phase === 'capturing' && (
+        <CapturingPhase
+          videoRef={videoRef}
+          frameProgress={frameProgress}
+          frameCount={FRAME_COUNT}
         />
       )}
 
@@ -300,16 +350,19 @@ function PromptPhase({
   onCapture,
   onPhonePair,
   onSkip,
+  hasSubjectCustomization = false,
 }: {
   onCapture: () => void;
   onPhonePair: () => void;
   onSkip: () => void;
+  hasSubjectCustomization?: boolean;
 }) {
   return (
     <div className="text-center space-y-6 py-4 animate-fade-in">
       <p className="text-parchment/70 font-body text-lg leading-relaxed max-w-md mx-auto">
-        Enable your camera so the Dungeon Master can see you.
-        Your appearance will be woven into the story and artwork.
+        {hasSubjectCustomization
+          ? 'Scan your face so you become the hero of the story. Your likeness will appear in every scene.'
+          : 'Enable your camera so the Dungeon Master can see you. Your appearance will be woven into the story and artwork.'}
       </p>
       <div className="flex flex-wrap justify-center gap-4">
         <button
@@ -379,6 +432,43 @@ function CameraPhase({
           Cancel
         </button>
       </div>
+    </div>
+  );
+}
+
+/** Shows the live camera feed with a progress indicator while capturing multiple frames. */
+function CapturingPhase({
+  videoRef,
+  frameProgress,
+  frameCount,
+}: {
+  videoRef: React.RefObject<HTMLVideoElement>;
+  frameProgress: number;
+  frameCount: number;
+}) {
+  return (
+    <div className="space-y-4 animate-fade-in">
+      <div className="relative rounded-xl overflow-hidden border border-gold/20 shadow-[0_0_30px_rgba(201,169,110,0.08)]">
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          muted
+          className="w-full aspect-video object-cover"
+        />
+        <div className="absolute inset-0 border-2 border-gold/30 rounded-xl pointer-events-none animate-pulse" />
+        <div className="absolute bottom-3 left-0 right-0 flex justify-center">
+          <div className="bg-black/60 backdrop-blur-sm rounded-full px-4 py-1.5 flex items-center gap-2">
+            <div className="w-3 h-3 border-2 border-gold/40 border-t-gold rounded-full animate-spin" />
+            <span className="text-gold text-xs font-mono tracking-wider">
+              Frame {frameProgress} / {frameCount}
+            </span>
+          </div>
+        </div>
+      </div>
+      <p className="text-center text-parchment/40 text-xs font-body">
+        Hold still — capturing from slightly different moments for better likeness...
+      </p>
     </div>
   );
 }
@@ -594,22 +684,35 @@ function ResultsPhase({
 
 /** Displays a single detected character's appearance details. */
 function CharacterCard({ person }: { person: CharacterAppearance }) {
+  const displayName = person.fantasy_name || person.label;
+
   return (
     <div className="bg-[#12121f] border border-gold/15 rounded-xl px-5 py-4 animate-slide-up">
-      <div className="flex items-baseline gap-3 mb-2">
+      <div className="flex items-baseline gap-3 mb-1">
         <span className="font-display text-gold text-sm tracking-wider uppercase">
-          {person.label}
+          {displayName}
         </span>
         {person.age_range && (
           <span className="text-parchment/30 text-xs font-mono">
             Age {person.age_range}
           </span>
         )}
+        {person.fantasy_name && person.fantasy_name !== person.label && (
+          <span className="text-parchment/20 text-[10px] font-mono">
+            ({person.label})
+          </span>
+        )}
       </div>
-      <div className="grid grid-cols-3 gap-x-4 gap-y-1 text-sm">
+      {person.character_description && (
+        <p className="text-parchment/60 font-body text-sm italic mb-2">
+          {person.character_description}
+        </p>
+      )}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-1 text-sm">
         <Detail label="Hair" value={person.hair} />
         <Detail label="Clothing" value={person.clothing} />
         <Detail label="Features" value={person.features} />
+        <Detail label="Skin tone" value={person.skin_tone || ''} />
       </div>
     </div>
   );

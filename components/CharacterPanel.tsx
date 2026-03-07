@@ -30,10 +30,13 @@ function CharacterCard({
   storyName?: string;
 }) {
   const { label, appearance } = profile;
-  const summary = [appearance.hair, appearance.clothing, appearance.features]
-    .filter(Boolean)
-    .slice(0, 2)
-    .join(' · ') || 'In the story';
+  const displayName = storyName || appearance.fantasy_name || label;
+  const subtitle = appearance.character_description
+    || [appearance.hair, appearance.clothing, appearance.features]
+        .filter(Boolean)
+        .slice(0, 2)
+        .join(' · ')
+    || 'In the story';
 
   return (
     <div className="flex items-center gap-3 rounded-lg border border-gold/15 bg-black/20 p-2.5">
@@ -42,14 +45,16 @@ function CharacterCard({
       </div>
       <div className="min-w-0 flex-1">
         <p className="font-display text-gold text-xs tracking-wider truncate">
-          {storyName || label}
+          {displayName}
         </p>
-        <p className="text-[10px] text-parchment-dim/70 truncate" title={summary}>
-          {summary}
+        <p className="text-[10px] text-parchment-dim/70 truncate" title={subtitle}>
+          {subtitle}
         </p>
       </div>
-      {storyName && storyName !== label && (
-        <span className="text-[10px] font-mono text-lavender-soft/80">→</span>
+      {displayName !== label && (
+        <span className="text-[10px] font-mono text-parchment/30 truncate">
+          {label}
+        </span>
       )}
     </div>
   );

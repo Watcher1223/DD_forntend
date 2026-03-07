@@ -12,12 +12,12 @@ export interface HealthResponse {
   has_vision: boolean;
   has_speech: boolean;
   has_livekit?: boolean;
-  has_subject_customization?: boolean;
+  has_subject_customization: boolean;
 }
 
 export interface ActionImage {
   imageUrl: string;
-  source: 'nanobanana' | 'imagen' | 'placeholder';
+  source: 'nanobanana' | 'imagen' | 'imagen_custom';
 }
 
 export interface ActionMusic {
@@ -69,9 +69,12 @@ export type StoryUpdateMessage = { type: 'story_update'; action?: string } & Act
 
 export interface CharacterAppearance {
   label: string;
+  fantasy_name?: string;
+  character_description?: string;
   hair: string;
   clothing: string;
   features: string;
+  skin_tone?: string;
   age_range: string;
 }
 
@@ -121,18 +124,44 @@ export interface StoryStatusResponse {
   language?: string;
 }
 
+/** POST /api/story/beat response */
 export interface StoryBeatResponse {
   narration: string;
   narrationAudioUrl?: string;
   scene_prompt?: string;
+  image?: ActionImage;
+  music?: {
+    theme?: string;
+    genre?: string;
+    mood?: string;
+    intensity?: number;
+    emotion?: string;
+  };
   theme?: string;
   mood?: string;
   intensity?: number;
   emotion?: string;
+  learning_moment?: string;
   location?: string;
+  story_energy?: number;
   event_number?: number;
   language?: string;
-  image?: ActionImage;
+}
+
+/** POST /api/story/configure body */
+export interface StoryConfigureBody {
+  childName: string;
+  childAge: number;
+  learningGoals?: string[];
+}
+
+/** POST /api/story/configure response */
+export interface StoryConfigureResponse {
+  campaignId: number;
+  childName: string;
+  childAge: number;
+  learningGoals: string[];
+  storyEnergy: number;
 }
 
 export interface MusicUpdateBody {
@@ -155,6 +184,7 @@ export interface MusicSessionEndedMessage {
   type: 'music_session_ended';
 }
 
+/** WebSocket: new character injected into the story via stage vision. */
 export interface CharacterInjectionMessage {
   type: 'character_injection';
   narration: string;
@@ -163,6 +193,7 @@ export interface CharacterInjectionMessage {
   new_entrant_description?: string;
 }
 
+/** WebSocket: periodic stage vision tick with people count. */
 export interface StageVisionTickMessage {
   type: 'stage_vision_tick';
   people_count: number;
@@ -170,6 +201,7 @@ export interface StageVisionTickMessage {
   setting?: string;
 }
 
+/** Single page in an exported storybook. */
 export interface StoryExportPage {
   narration: string;
   imageUrl?: string;
@@ -177,6 +209,7 @@ export interface StoryExportPage {
   learning_moment?: string;
 }
 
+/** GET /api/story/export response. */
 export interface StoryExportResponse {
   childName?: string;
   learningGoals?: string[];

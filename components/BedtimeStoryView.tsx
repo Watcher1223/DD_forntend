@@ -1,6 +1,12 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
+import CharacterSetup from '@/components/CharacterSetup';
+import StoryWorld from '@/components/StoryWorld';
+import NarrationPanel from '@/components/NarrationPanel';
+import MusicMoodPanel from '@/components/MusicMoodPanel';
+import CharacterPanel from '@/components/CharacterPanel';
+import EventLog from '@/components/EventLog';
 import type {
   HealthResponse,
   StoryStatusResponse,
@@ -8,101 +14,115 @@ import type {
   AudioChunkMessage,
   MusicSessionEndedMessage,
   CharacterInjectionMessage,
-  StageVisionTickMessage,
+  CameraProfile,
+  SpeechTranscribeResponse,
   StoryExportResponse,
-  ActionImage,
 } from '@/lib/api-types';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4300';
 const WS_URL = API_BASE.replace(/^http/, 'ws');
 
-// ── Helpers ──
-
-function decodeBase64ToArrayBuffer(base64: string): ArrayBuffer {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes.buffer;
-}
-
-function captureVideoFrame(video: HTMLVideoElement): string | null {
-  const canvas = document.createElement('canvas');
-  canvas.width = video.videoWidth || 640;
-  canvas.height = video.videoHeight || 480;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return null;
-  ctx.drawImage(video, 0, 0);
-  return canvas.toDataURL('image/jpeg', 0.7);
-}
-
-// ── Types ──
-
-type Phase = 'setup' | 'playing' | 'export';
-
-interface StoryScene {
+interface StoryEvent {
+  action: string;
   narration: string;
-  narrationAudioUrl?: string;
-  imageUrl?: string;
-  location?: string;
-  theme?: string;
-  mood?: string;
-  isCharacterInjection?: boolean;
+  music_mood: string;
+  location: string;
+  timestamp: number;
 }
 
-// ── Component ──
+type MicState = 'idle' | 'recording' | 'transcribing';
 
+/**
+ * Full bedtime story experience: face scan -> configure -> session control ->
+ * story beats with scene images, narration, character panel, music, and event log.
+ */
 export default function BedtimeStoryView() {
-  // Health
+  // ── Health & gating ──
   const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [showFaceScan, setShowFaceScan] = useState(true);
+  const [configured, setConfigured] = useState(false);
 
-  // Phase
-  const [phase, setPhase] = useState<Phase>('setup');
-
-  // Setup state
-  const [themeInput, setThemeInput] = useState('');
-  const [userTheme, setUserTheme] = useState('');
-  const [language, setLanguage] = useState('en');
-  const [protagonist, setProtagonist] = useState('');
-  const [faceStored, setFaceStored] = useState(false);
-
-  // Story state
-  const [scenes, setScenes] = useState<StoryScene[]>([]);
-  const [currentSceneIdx, setCurrentSceneIdx] = useState(-1);
-  const [beatInput, setBeatInput] = useState('');
-  const [isBeating, setIsBeating] = useState(false);
-  const [isStarting, setIsStarting] = useState(false);
-  const [sessionActive, setSessionActive] = useState(false);
-  const [peopleCount, setPeopleCount] = useState(0);
-  const [detectedEmotion, setDetectedEmotion] = useState('');
+  // ── Story session ──
+  const [active, setActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [autoAdvance, setAutoAdvance] = useState(false);
+  const [isStarting, setIsStarting] = useState(false);
+  const [isBeating, setIsBeating] = useState(false);
 
-  // Camera
-  const [cameraActive, setCameraActive] = useState(false);
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
+  // ── Story state (populated from beat responses) ──
+  const [narration, setNarration] = useState('');
+  const [narrationAudioUrl, setNarrationAudioUrl] = useState<string | null>(null);
+  const [sceneImage, setSceneImage] = useState<string | null>(null);
+  const [imageSource, setImageSource] = useState<'nanobanana' | 'imagen' | 'imagen_custom' | null>(null);
+  const [location, setLocation] = useState('');
+  const [musicMood, setMusicMood] = useState('calm');
+  const [events, setEvents] = useState<StoryEvent[]>([]);
+  const [eventNumber, setEventNumber] = useState(0);
+  const [lastInput, setLastInput] = useState('');
 
-  // Audio
+  // ── Characters ──
+  const [cameraProfiles, setCameraProfiles] = useState<CameraProfile[]>([]);
+
+  // ── Input ──
+  const [beatInput, setBeatInput] = useState('');
+  const [micState, setMicState] = useState<MicState>('idle');
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const micStreamRef = useRef<MediaStream | null>(null);
+
+  // ── Configure form ──
+  const [childName, setChildName] = useState('');
+  const [childAge, setChildAge] = useState('');
+  const [themeInput, setThemeInput] = useState('');
+  const [language, setLanguage] = useState('en');
+
+  // ── WebSocket / Audio ──
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const nextStartTimeRef = useRef(0);
   const subscribedRef = useRef(false);
   const narrationAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  // Intervals
-  const emotionIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const visionIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const autoAdvanceRef = useRef<NodeJS.Timeout | null>(null);
-
-  // ── Health check ──
+  // ── Health check on mount ──
   useEffect(() => {
     fetch(`${API_BASE}/api/health`)
       .then((r) => r.json())
-      .then((data: HealthResponse) => setHealth(data))
-      .catch(() => setError('Cannot reach the backend. Is it running on port 4300?'));
+      .then((data: HealthResponse) => {
+        setHealth(data);
+        if (!data.has_subject_customization && !data.has_vision) {
+          setShowFaceScan(false);
+        }
+      })
+      .catch(() => {
+        setError('Cannot reach the backend.');
+        setShowFaceScan(false);
+      });
   }, []);
 
-  // ── WebSocket for Lyria audio + events ──
+  // ── Check if already configured & active on mount ──
+  useEffect(() => {
+    refreshStatus();
+  }, []);
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/story/status`);
+      const data = (await res.json()) as StoryStatusResponse;
+      setActive(data.active);
+      if (data.active) setConfigured(true);
+    } catch {
+      setActive(false);
+    }
+  }, []);
+
+  // ── Load camera profiles on mount ──
+  useEffect(() => {
+    fetch(`${API_BASE}/api/camera/profiles`)
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((data: { profiles: CameraProfile[] }) => setCameraProfiles(data.profiles || []))
+      .catch(() => {});
+  }, []);
+
+  // ── WebSocket for Lyria RealTime audio streaming + events ──
   useEffect(() => {
     const ws = new WebSocket(WS_URL);
 
@@ -114,16 +134,12 @@ export default function BedtimeStoryView() {
     ws.onmessage = (evt) => {
       try {
         const msg = JSON.parse(typeof evt.data === 'string' ? evt.data : evt.data.toString());
-
         if (msg.type === 'audio_chunk' && msg.payload) {
-          playPCMChunk(msg as AudioChunkMessage);
+          playAudioChunk(msg as AudioChunkMessage);
         } else if (msg.type === 'music_session_ended') {
-          setSessionActive(false);
+          setActive(false);
         } else if (msg.type === 'character_injection') {
           handleCharacterInjection(msg as CharacterInjectionMessage);
-        } else if (msg.type === 'stage_vision_tick') {
-          const tick = msg as StageVisionTickMessage;
-          setPeopleCount(tick.people_count);
         }
       } catch {
         // ignore
@@ -141,8 +157,8 @@ export default function BedtimeStoryView() {
     };
   }, []);
 
-  // ── PCM playback ──
-  const playPCMChunk = useCallback((msg: AudioChunkMessage) => {
+  /** Decode and schedule a PCM audio chunk for playback via Web Audio API. */
+  function playAudioChunk(msg: AudioChunkMessage) {
     const int16 = new Int16Array(decodeBase64ToArrayBuffer(msg.payload));
     const sampleRate = msg.sampleRate || 48000;
     const channels = msg.channels || 2;
@@ -166,7 +182,7 @@ export default function BedtimeStoryView() {
     }
 
     const gain = ctx.createGain();
-    gain.gain.value = 0.4; // Background music volume
+    gain.gain.value = 0.4;
     gain.connect(ctx.destination);
 
     const source = ctx.createBufferSource();
@@ -175,105 +191,72 @@ export default function BedtimeStoryView() {
     const startTime = Math.max(nextStartTimeRef.current, ctx.currentTime);
     nextStartTimeRef.current = startTime + buffer.duration;
     source.start(startTime);
-  }, []);
+  }
 
-  // ── Character injection from WebSocket ──
-  const handleCharacterInjection = useCallback((msg: CharacterInjectionMessage) => {
-    const scene: StoryScene = {
-      narration: msg.narration || 'A new character appears in the story...',
-      imageUrl: msg.imageUrl,
-      isCharacterInjection: true,
-    };
-    setScenes((prev) => [...prev, scene]);
-    setCurrentSceneIdx((prev) => prev + 1);
-  }, []);
-
-  // ── Camera management ──
-  const startCamera = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 640, height: 480, facingMode: 'user' },
-      });
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-      }
-      streamRef.current = stream;
-      setCameraActive(true);
-    } catch (err) {
-      setError('Camera access denied. Allow camera to use face/doll detection.');
+  /** Handle a character injection broadcast from the stage vision pipeline. */
+  function handleCharacterInjection(msg: CharacterInjectionMessage) {
+    const injectionNarration = msg.narration || 'A new character appears in the story...';
+    setNarration(injectionNarration);
+    if (msg.imageUrl) {
+      setSceneImage(msg.imageUrl);
+      setImageSource('imagen_custom');
     }
-  };
+    setEvents((prev) => [
+      ...prev,
+      {
+        action: 'New character arrives',
+        narration: injectionNarration,
+        music_mood: musicMood,
+        location,
+        timestamp: Date.now(),
+      },
+    ]);
+  }
 
-  const stopCamera = () => {
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = null;
-    setCameraActive(false);
-    if (emotionIntervalRef.current) clearInterval(emotionIntervalRef.current);
-    if (visionIntervalRef.current) clearInterval(visionIntervalRef.current);
-  };
-
-  // ── Capture face ──
-  const captureFace = async () => {
-    if (!videoRef.current) return;
-    const frame = captureVideoFrame(videoRef.current);
-    if (!frame) return;
+  // ── Story configure ──
+  async function handleConfigure() {
+    const name = childName.trim();
+    const age = parseInt(childAge, 10);
+    if (!name) {
+      setError('Please enter a name.');
+      return;
+    }
+    if (!age || age < 1 || age > 18) {
+      setError('Please enter an age between 1 and 18.');
+      return;
+    }
+    setError(null);
     try {
-      const res = await fetch(`${API_BASE}/api/camera/analyze`, {
+      const res = await fetch(`${API_BASE}/api/story/configure`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ frame }),
+        body: JSON.stringify({ childName: name, childAge: age }),
       });
-      if (res.ok) {
-        setFaceStored(true);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error((body as any).error || `Configure failed (${res.status})`);
       }
-    } catch {
-      // silent
+      setConfigured(true);
+    } catch (err: any) {
+      setError(err.message || 'Failed to configure story.');
     }
-  };
+  }
 
-  // ── Detect doll/toy ──
-  const detectDoll = async () => {
-    if (!videoRef.current) return;
-    const frame = captureVideoFrame(videoRef.current);
-    if (!frame) return;
-    try {
-      const res = await fetch(`${API_BASE}/api/story/detect-object`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ frame }),
-      });
-      const data = await res.json();
-      if (data.protagonist_description) {
-        setProtagonist(data.protagonist_description);
-        await fetch(`${API_BASE}/api/story/set-protagonist`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ protagonist_description: data.protagonist_description }),
-        });
-      }
-    } catch {
-      // silent
-    }
-  };
-
-  // ── Start story session ──
-  const handleStart = async () => {
+  // ── Session start/stop ──
+  async function handleStart() {
     setError(null);
     setIsStarting(true);
     try {
-      // Ensure WebSocket is subscribed
       if (!subscribedRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({ type: 'subscribe', channel: 'story_audio' }));
         subscribedRef.current = true;
         await new Promise((r) => setTimeout(r, 500));
       }
 
-      // Resume audio context (needs user gesture)
       if (audioContextRef.current?.state === 'suspended') {
         audioContextRef.current.resume();
       }
 
-      // Start session with theme
       const body: Record<string, string> = {};
       if (themeInput.trim()) body.themeDescription = themeInput.trim();
       if (language !== 'en') body.language = language;
@@ -283,76 +266,52 @@ export default function BedtimeStoryView() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setError(data.error || data.details || `Failed to start (${res.status})`);
+        setError((data as any).error || (data as any).details || `Failed to start (${res.status})`);
         return;
       }
-
-      setSessionActive(true);
-      setUserTheme(data.userTheme || themeInput.trim() || 'bedtime');
-      setPhase('playing');
-
-      // Start emotion + vision polling if camera is on
-      if (cameraActive) {
-        startEmotionPolling();
-        startVisionPolling();
-      }
+      setActive(true);
     } finally {
       setIsStarting(false);
     }
-  };
+  }
 
-  // ── Stop session ──
-  const handleStop = async () => {
+  async function handleStop() {
     try {
       await fetch(`${API_BASE}/api/story/stop`, { method: 'POST' });
     } catch {
       // silent
     }
-    setSessionActive(false);
-    if (emotionIntervalRef.current) clearInterval(emotionIntervalRef.current);
-    if (visionIntervalRef.current) clearInterval(visionIntervalRef.current);
-    if (autoAdvanceRef.current) clearTimeout(autoAdvanceRef.current);
-  };
+    setActive(false);
+  }
 
   // ── Story beat ──
-  const handleBeat = async (actionOverride?: string) => {
-    const action = actionOverride || beatInput.trim() || 'The story continues...';
+  async function handleBeat() {
+    const action = beatInput.trim() || 'The story continues gently.';
     setError(null);
     setIsBeating(true);
+    setLastInput(action);
     try {
       const res = await fetch(`${API_BASE}/api/story/beat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action }),
       });
-      const data = (await res.json()) as StoryBeatResponse & { error?: string };
+      const data = (await res.json()) as StoryBeatResponse & { error?: string; details?: string };
       if (!res.ok) {
-        setError(data.error || 'Story beat failed');
+        setError(data.error || data.details || 'Beat failed');
         return;
       }
 
-      const scene: StoryScene = {
-        narration: data.narration || '',
-        narrationAudioUrl: data.narrationAudioUrl,
-        imageUrl: data.image?.imageUrl,
-        location: data.location,
-        theme: data.theme,
-        mood: data.mood,
-      };
-
-      setScenes((prev) => [...prev, scene]);
-      setCurrentSceneIdx((prev) => prev + 1);
+      applyBeatResponse(action, data);
       setBeatInput('');
 
-      // Play narration audio
       if (data.narrationAudioUrl) {
         playNarration(data.narrationAudioUrl);
       }
 
-      // Update music with new mood
-      if (sessionActive && (data.theme || data.mood || data.emotion)) {
+      if (active && (data.theme || data.mood || data.emotion)) {
         fetch(`${API_BASE}/api/music/update`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -364,22 +323,37 @@ export default function BedtimeStoryView() {
           }),
         }).catch(() => {});
       }
-
-      // Auto-advance: queue next beat after narration
-      if (autoAdvance) {
-        autoAdvanceRef.current = setTimeout(() => {
-          handleBeat('The story continues naturally...');
-        }, 12000);
-      }
     } catch {
       setError('Story beat request failed');
     } finally {
       setIsBeating(false);
     }
-  };
+  }
 
-  // ── Narration playback ──
-  const playNarration = (url: string) => {
+  /** Update all story state from a beat response. */
+  function applyBeatResponse(action: string, data: StoryBeatResponse) {
+    setNarration(data.narration || '');
+    setNarrationAudioUrl(data.narrationAudioUrl ?? null);
+    setSceneImage(data.image?.imageUrl ?? sceneImage);
+    setImageSource(data.image?.source ?? imageSource);
+    setLocation(data.location || location);
+    setMusicMood(data.music?.mood || data.mood || musicMood);
+    if (data.event_number != null) setEventNumber(data.event_number);
+
+    setEvents((prev) => [
+      ...prev,
+      {
+        action,
+        narration: data.narration || '',
+        music_mood: data.music?.mood || data.mood || 'calm',
+        location: data.location || location,
+        timestamp: Date.now(),
+      },
+    ]);
+  }
+
+  /** Play narration TTS audio. */
+  function playNarration(url: string) {
     if (narrationAudioRef.current) {
       narrationAudioRef.current.pause();
     }
@@ -387,497 +361,413 @@ export default function BedtimeStoryView() {
     audio.volume = 1.0;
     narrationAudioRef.current = audio;
     audio.play().catch(() => {});
-  };
-
-  // ── Emotion polling (camera → music) ──
-  const startEmotionPolling = () => {
-    if (emotionIntervalRef.current) clearInterval(emotionIntervalRef.current);
-    emotionIntervalRef.current = setInterval(async () => {
-      if (!videoRef.current || !cameraActive) return;
-      const frame = captureVideoFrame(videoRef.current);
-      if (!frame) return;
-      try {
-        const res = await fetch(`${API_BASE}/api/story/emotion-from-camera`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ frame, updateMusic: true }),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          setDetectedEmotion(data.emotion || '');
-        }
-      } catch {
-        // silent
-      }
-    }, 4000);
-  };
-
-  // ── Vision polling (detect new people) ──
-  const startVisionPolling = () => {
-    if (visionIntervalRef.current) clearInterval(visionIntervalRef.current);
-    visionIntervalRef.current = setInterval(async () => {
-      if (!videoRef.current || !cameraActive) return;
-      const frame = captureVideoFrame(videoRef.current);
-      if (!frame) return;
-      try {
-        await fetch(`${API_BASE}/api/story/stage-vision`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ frame, generateImage: true }),
-        });
-      } catch {
-        // silent
-      }
-    }, 6000);
-  };
+  }
 
   // ── Export storybook ──
-  const handleExport = async () => {
+  async function handleExport() {
     try {
       const res = await fetch(`${API_BASE}/api/story/export`);
       const data = (await res.json()) as StoryExportResponse;
-      setPhase('export');
-      // Scenes already in state; export data enriches them
       if (data.pages?.length) {
-        const exportScenes: StoryScene[] = data.pages.map((p) => ({
-          narration: p.narration,
-          imageUrl: p.imageUrl,
-        }));
-        setScenes(exportScenes);
-        setCurrentSceneIdx(0);
+        const win = window.open('', '_blank');
+        if (win) {
+          const html = data.pages
+            .map(
+              (p, i) =>
+                `<div style="margin-bottom:2rem;"><h3>Scene ${i + 1}</h3>${p.imageUrl ? `<img src="${p.imageUrl}" style="max-width:100%;border-radius:12px;" />` : ''}<p style="font-style:italic;">${p.narration}</p></div>`
+            )
+            .join('');
+          win.document.write(`<html><head><title>Storybook</title></head><body style="font-family:serif;max-width:800px;margin:0 auto;padding:2rem;">${html}</body></html>`);
+        }
       }
     } catch {
       setError('Export failed');
     }
-  };
+  }
+
+  // ── Voice input (speech-to-text) ──
+  const startRecording = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStreamRef.current = stream;
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4';
+      const recorder = new MediaRecorder(stream, { mimeType });
+      chunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
+      recorder.onstop = () => transcribeRecording(mimeType);
+      recorderRef.current = recorder;
+      recorder.start();
+      setMicState('recording');
+    } catch {
+      setMicState('idle');
+    }
+  }, []);
+
+  function stopRecording() {
+    recorderRef.current?.stop();
+    micStreamRef.current?.getTracks().forEach((t) => t.stop());
+    micStreamRef.current = null;
+  }
+
+  async function transcribeRecording(mimeType: string) {
+    setMicState('transcribing');
+    const blob = new Blob(chunksRef.current, { type: mimeType });
+    const base64 = await blobToDataUrl(blob);
+    try {
+      const res = await fetch(`${API_BASE}/api/speech/transcribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ audio: base64 }),
+      });
+      if (!res.ok) throw new Error('Transcription failed');
+      const data = (await res.json()) as SpeechTranscribeResponse;
+      if (data.transcript) setBeatInput(data.transcript);
+    } catch {
+      // Silently fail — user can still type
+    } finally {
+      setMicState('idle');
+    }
+  }
+
+  function handleMicClick() {
+    if (micState === 'recording') {
+      stopRecording();
+    } else if (micState === 'idle') {
+      startRecording();
+    }
+  }
 
   // ── Cleanup ──
   useEffect(() => {
     return () => {
-      stopCamera();
-      if (emotionIntervalRef.current) clearInterval(emotionIntervalRef.current);
-      if (visionIntervalRef.current) clearInterval(visionIntervalRef.current);
-      if (autoAdvanceRef.current) clearTimeout(autoAdvanceRef.current);
+      micStreamRef.current?.getTracks().forEach((t) => t.stop());
+      recorderRef.current = null;
     };
   }, []);
 
-  // Current scene
-  const currentScene = currentSceneIdx >= 0 ? scenes[currentSceneIdx] : null;
+  // ── Face scan callbacks ──
+  function handleFaceScanComplete(profiles: CameraProfile[]) {
+    setCameraProfiles(profiles);
+    setShowFaceScan(false);
+  }
 
-  // ── RENDER ──
+  function handleFaceScanSkip() {
+    setShowFaceScan(false);
+  }
 
-  // Setup phase
-  if (phase === 'setup') {
+  // ── Render: loading spinner ──
+  if (!health && !error) {
     return (
-      <div className="max-w-3xl mx-auto space-y-6 animate-fade-in">
-        {error && (
-          <div className="rounded-xl bg-red-900/20 border border-red-500/30 px-4 py-3 text-red-200 text-sm text-center">
-            {error}
-          </div>
-        )}
-
-        {/* Theme input */}
-        <div className="bg-midnight-light/50 border border-gold/10 rounded-2xl p-6 space-y-4">
-          <h2 className="font-display text-gold text-lg tracking-wider text-center">
-            What&rsquo;s tonight&rsquo;s story about?
-          </h2>
-          <p className="text-parchment-dim/50 text-xs text-center">
-            Say a theme or type it — e.g. &ldquo;forest adventure&rdquo;, &ldquo;under the sea&rdquo;, &ldquo;space mission&rdquo;
-          </p>
-          <input
-            type="text"
-            value={themeInput}
-            onChange={(e) => setThemeInput(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && themeInput.trim() && handleStart()}
-            placeholder="forest adventure, under the sea, space..."
-            className="w-full bg-midnight border border-gold/20 rounded-xl px-4 py-3 text-parchment placeholder:text-parchment-dim/30 font-body focus:outline-none focus:border-gold/50 transition-all"
-          />
-
-          {/* Language select */}
-          <div className="flex items-center gap-3">
-            <label className="text-gold/50 text-xs font-mono shrink-0">Language:</label>
-            <select
-              value={language}
-              onChange={(e) => setLanguage(e.target.value)}
-              className="bg-midnight border border-gold/20 rounded-lg px-3 py-1.5 text-parchment text-sm font-body focus:outline-none focus:border-gold/50"
-            >
-              <option value="en">English</option>
-              <option value="es">Spanish</option>
-              <option value="fr">French</option>
-              <option value="sw">Swahili</option>
-              <option value="ru">Russian</option>
-              <option value="de">German</option>
-              <option value="it">Italian</option>
-              <option value="pt">Portuguese</option>
-              <option value="ja">Japanese</option>
-              <option value="ko">Korean</option>
-              <option value="zh">Chinese</option>
-              <option value="ar">Arabic</option>
-              <option value="hi">Hindi</option>
-            </select>
-          </div>
-        </div>
-
-        {/* Camera setup */}
-        <div className="bg-midnight-light/50 border border-gold/10 rounded-2xl p-6 space-y-4">
-          <h2 className="font-display text-gold/80 text-base tracking-wider text-center">
-            Camera (optional)
-          </h2>
-          <p className="text-parchment-dim/40 text-xs text-center">
-            Enable camera so your face appears in the story, detect your doll as the hero, and adapt music to your mood
-          </p>
-
-          {!cameraActive ? (
-            <button
-              onClick={startCamera}
-              className="mx-auto block bg-gold/10 hover:bg-gold/20 border border-gold/30 rounded-xl px-5 py-2.5 font-display text-gold text-sm tracking-wider transition-all"
-            >
-              Enable Camera
-            </button>
-          ) : (
-            <div className="space-y-3">
-              <div className="relative w-48 h-36 mx-auto rounded-xl overflow-hidden border border-gold/20">
-                <video
-                  ref={videoRef}
-                  autoPlay
-                  playsInline
-                  muted
-                  className="w-full h-full object-cover"
-                />
-              </div>
-
-              <div className="flex flex-wrap justify-center gap-2">
-                <button
-                  onClick={captureFace}
-                  disabled={faceStored}
-                  className={`text-xs px-3 py-1.5 rounded-lg border transition-all ${
-                    faceStored
-                      ? 'border-emerald-500/40 text-emerald-400/80 bg-emerald-900/20'
-                      : 'border-gold/30 text-gold/70 hover:bg-gold/10'
-                  }`}
-                >
-                  {faceStored ? 'Face stored' : 'Capture my face'}
-                </button>
-
-                <button
-                  onClick={detectDoll}
-                  className={`text-xs px-3 py-1.5 rounded-lg border transition-all ${
-                    protagonist
-                      ? 'border-emerald-500/40 text-emerald-400/80 bg-emerald-900/20'
-                      : 'border-gold/30 text-gold/70 hover:bg-gold/10'
-                  }`}
-                >
-                  {protagonist ? `Hero: ${protagonist.slice(0, 30)}...` : 'Detect my doll'}
-                </button>
-
-                <button
-                  onClick={stopCamera}
-                  className="text-xs px-3 py-1.5 rounded-lg border border-red-500/30 text-red-400/70 hover:bg-red-900/20 transition-all"
-                >
-                  Stop camera
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Start button */}
-        <div className="text-center">
-          <button
-            onClick={handleStart}
-            disabled={isStarting || !health}
-            className="bg-gold/15 hover:bg-gold/25 border border-gold/40 rounded-2xl px-10 py-4 font-display text-gold text-lg tracking-[0.15em] transition-all disabled:opacity-40 hover:shadow-[0_0_30px_rgba(212,168,83,0.15)]"
-          >
-            {isStarting ? 'Starting...' : 'Begin the Story'}
-          </button>
-          {!themeInput.trim() && (
-            <p className="text-parchment-dim/30 text-[10px] mt-2">
-              A magical bedtime story will begin with a default theme
-            </p>
-          )}
-        </div>
+      <div className="flex justify-center py-16">
+        <div className="w-8 h-8 border-2 border-gold/30 border-t-gold rounded-full animate-spin" />
       </div>
     );
   }
 
-  // Export phase
-  if (phase === 'export') {
+  // ── Render: face scan gate ──
+  if (showFaceScan && (health?.has_subject_customization || health?.has_vision)) {
     return (
-      <div className="max-w-4xl mx-auto space-y-6 animate-fade-in">
-        <h2 className="font-display text-gold text-2xl text-center tracking-wider">
-          Your Storybook
-        </h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {scenes.map((s, i) => (
-            <div
-              key={i}
-              className="bg-midnight-light/50 border border-gold/10 rounded-2xl overflow-hidden"
-            >
-              {s.imageUrl && (
-                <img
-                  src={s.imageUrl}
-                  alt={`Scene ${i + 1}`}
-                  className="w-full aspect-video object-cover"
-                />
-              )}
-              <div className="p-4">
-                <p className="text-parchment font-story italic text-sm leading-relaxed">
-                  &ldquo;{s.narration}&rdquo;
-                </p>
-              </div>
-            </div>
-          ))}
-        </div>
-        <div className="text-center">
-          <button
-            onClick={() => setPhase('playing')}
-            className="text-gold/50 hover:text-gold text-sm transition-colors"
-          >
-            Back to story
-          </button>
-        </div>
-      </div>
+      <CharacterSetup
+        hasVision={health?.has_vision ?? false}
+        hasSubjectCustomization={health?.has_subject_customization ?? false}
+        onComplete={handleFaceScanComplete}
+        onSkip={handleFaceScanSkip}
+      />
     );
   }
 
-  // ── Playing phase ──
+  // ── Render: configure step (child name + age + theme) ──
+  if (!configured) {
+    return (
+      <ConfigureStep
+        childName={childName}
+        childAge={childAge}
+        themeInput={themeInput}
+        language={language}
+        error={error}
+        onNameChange={setChildName}
+        onAgeChange={setChildAge}
+        onThemeChange={setThemeInput}
+        onLanguageChange={setLanguage}
+        onSubmit={handleConfigure}
+      />
+    );
+  }
+
+  // ── Render: main story view ──
+  const hasSpeech = health?.has_speech ?? false;
+  const micDisabled = isBeating || micState === 'transcribing';
+
   return (
-    <div className="max-w-5xl mx-auto space-y-4 animate-fade-in">
+    <div className="space-y-4 animate-fade-in">
+      {/* Health / config warnings */}
+      {health && !health.has_gemini && (
+        <div className="rounded-lg bg-amber-900/20 border border-amber-600/30 px-4 py-2 text-center text-amber-200/90 text-sm">
+          Configure Gemini API — story beats will return 503 until GEMINI_API_KEY is set.
+        </div>
+      )}
+      {health && !health.has_lyria && (
+        <div className="rounded-lg bg-amber-900/15 border border-amber-600/20 px-4 py-1.5 text-center text-amber-200/70 text-xs">
+          Music unavailable until GOOGLE_CLOUD_PROJECT and billing are configured.
+        </div>
+      )}
       {error && (
-        <div className="rounded-xl bg-red-900/20 border border-red-500/30 px-4 py-2 text-red-200 text-sm text-center">
+        <div className="rounded-lg bg-red-900/20 border border-red-600/30 px-4 py-2 text-center text-red-200 text-sm">
           {error}
         </div>
       )}
 
-      {/* Scene display — the "video" */}
-      <div className="relative w-full aspect-video rounded-2xl overflow-hidden border border-gold/15 shadow-2xl bg-midnight">
-        {currentScene?.imageUrl ? (
-          <img
-            key={currentSceneIdx}
-            src={currentScene.imageUrl}
-            alt="Story scene"
-            className="w-full h-full object-cover animate-fade-in"
-          />
-        ) : isBeating ? (
-          <div className="absolute inset-0 shimmer flex items-center justify-center">
-            <div className="text-center">
-              <div className="text-gold text-5xl animate-pulse-slow">&#9733;</div>
-              <p className="text-gold/60 text-sm mt-3 font-story">Creating the next scene...</p>
-            </div>
-          </div>
+      {/* Scene image */}
+      <StoryWorld
+        imageUrl={sceneImage}
+        imageSource={imageSource}
+        isLoading={isBeating}
+        eventNumber={eventNumber}
+        location={location}
+      />
+
+      {/* Session controls */}
+      <div className="flex items-center justify-center gap-4">
+        {!active ? (
+          <button
+            onClick={handleStart}
+            disabled={!health?.has_lyria || isStarting}
+            className="bg-gold/10 hover:bg-gold/20 border border-gold/40 rounded-xl px-6 py-3 font-display text-gold text-sm tracking-wider disabled:opacity-50 transition-all hover:shadow-[0_0_20px_rgba(201,169,110,0.15)]"
+          >
+            {isStarting ? 'Starting...' : 'Start Music Session'}
+          </button>
         ) : (
-          <div className="absolute inset-0 bg-gradient-to-b from-midnight-light to-midnight flex items-center justify-center">
-            <div className="text-center">
-              <div className="text-6xl mb-4">&#127769;</div>
-              <p className="font-display text-gold text-xl tracking-widest">
-                {userTheme || 'Bedtime Story'}
-              </p>
-              <p className="text-gold/30 text-sm mt-2 font-story italic">
-                Music is playing... add a story beat to begin
-              </p>
-            </div>
-          </div>
-        )}
-
-        {/* Gradient overlay */}
-        <div className="absolute inset-0 bg-gradient-to-t from-midnight via-transparent to-transparent pointer-events-none" />
-
-        {/* Scene counter */}
-        {scenes.length > 0 && (
-          <div className="absolute top-3 right-3 bg-black/50 backdrop-blur-sm px-3 py-1 rounded-full border border-gold/20">
-            <span className="text-gold/70 text-xs font-mono">
-              Scene {currentSceneIdx + 1} / {scenes.length}
+          <>
+            <span className="flex items-center gap-1.5 text-xs text-emerald-400/60">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              Music streaming
             </span>
-          </div>
-        )}
-
-        {/* Character injection badge */}
-        {currentScene?.isCharacterInjection && (
-          <div className="absolute top-3 left-3 bg-lavender/20 backdrop-blur-sm px-3 py-1 rounded-full border border-lavender/30">
-            <span className="text-lavender text-xs font-display tracking-wider">
-              New Character!
-            </span>
-          </div>
-        )}
-
-        {/* Emotion indicator */}
-        {detectedEmotion && (
-          <div className="absolute bottom-3 left-3 bg-black/50 backdrop-blur-sm px-3 py-1 rounded-full border border-gold/20">
-            <span className="text-gold/60 text-xs font-mono">
-              Mood: {detectedEmotion}
-            </span>
-          </div>
-        )}
-
-        {/* People counter */}
-        {peopleCount > 0 && (
-          <div className="absolute bottom-3 right-3 bg-black/50 backdrop-blur-sm px-3 py-1 rounded-full border border-gold/20">
-            <span className="text-gold/60 text-xs font-mono">
-              {peopleCount} {peopleCount === 1 ? 'person' : 'people'} on stage
-            </span>
-          </div>
-        )}
-      </div>
-
-      {/* Scene navigation (for scrolling through generated scenes) */}
-      {scenes.length > 1 && (
-        <div className="flex items-center justify-center gap-3">
-          <button
-            onClick={() => setCurrentSceneIdx(Math.max(0, currentSceneIdx - 1))}
-            disabled={currentSceneIdx <= 0}
-            className="text-gold/40 hover:text-gold disabled:opacity-20 transition-colors text-xl"
-          >
-            &#9664;
-          </button>
-          <div className="flex gap-1.5">
-            {scenes.map((_, i) => (
-              <button
-                key={i}
-                onClick={() => setCurrentSceneIdx(i)}
-                className={`w-2 h-2 rounded-full transition-all ${
-                  i === currentSceneIdx ? 'bg-gold scale-125' : 'bg-gold/20 hover:bg-gold/40'
-                }`}
-              />
-            ))}
-          </div>
-          <button
-            onClick={() => setCurrentSceneIdx(Math.min(scenes.length - 1, currentSceneIdx + 1))}
-            disabled={currentSceneIdx >= scenes.length - 1}
-            className="text-gold/40 hover:text-gold disabled:opacity-20 transition-colors text-xl"
-          >
-            &#9654;
-          </button>
-        </div>
-      )}
-
-      {/* Narration text */}
-      {currentScene?.narration && (
-        <div className="bg-midnight-light/40 border border-gold/10 rounded-2xl p-5">
-          {currentScene.location && (
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-gold/30 text-xs">&#9670;</span>
-              <span className="font-display text-gold/50 text-[10px] tracking-[0.2em] uppercase">
-                {currentScene.location}
-              </span>
-              <div className="flex-1 h-px bg-gold/10" />
-            </div>
-          )}
-          <p className="text-parchment font-story italic text-lg leading-relaxed">
-            &ldquo;{currentScene.narration}&rdquo;
-          </p>
-          {currentScene.narrationAudioUrl && (
             <button
-              onClick={() => playNarration(currentScene.narrationAudioUrl!)}
-              className="mt-2 text-gold/40 hover:text-gold text-xs font-mono transition-colors"
+              onClick={handleStop}
+              className="bg-red-900/20 hover:bg-red-900/30 border border-red-600/40 rounded-xl px-6 py-3 font-display text-red-200 text-sm tracking-wider transition-all"
             >
-              &#9654; Replay narration
+              Stop Music
             </button>
-          )}
-        </div>
-      )}
-
-      {/* Story input + controls */}
-      <div className="flex gap-2">
-        <input
-          type="text"
-          value={beatInput}
-          onChange={(e) => setBeatInput(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && !isBeating && handleBeat()}
-          placeholder='What happens next? e.g. "The hero finds a glowing cave" or "Continue in Swahili"'
-          disabled={isBeating}
-          className="flex-1 bg-midnight border border-gold/20 rounded-xl px-4 py-3 text-parchment placeholder:text-parchment-dim/25 font-body text-sm focus:outline-none focus:border-gold/50 transition-all disabled:opacity-50"
-        />
-        <button
-          onClick={() => handleBeat()}
-          disabled={isBeating}
-          className="bg-gold/10 hover:bg-gold/20 border border-gold/30 rounded-xl px-5 py-3 font-display text-gold text-sm tracking-wider transition-all disabled:opacity-40"
-        >
-          {isBeating ? (
-            <span className="animate-pulse">...</span>
-          ) : (
-            'Next'
-          )}
-        </button>
-      </div>
-
-      {/* Bottom controls row */}
-      <div className="flex flex-wrap items-center gap-2">
-        {/* Auto-advance toggle */}
-        <label className="flex items-center gap-2 text-xs text-parchment-dim/40 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={autoAdvance}
-            onChange={(e) => {
-              setAutoAdvance(e.target.checked);
-              if (!e.target.checked && autoAdvanceRef.current) {
-                clearTimeout(autoAdvanceRef.current);
-              }
-            }}
-            className="accent-gold"
-          />
-          Auto-advance story
-        </label>
-
-        {/* Camera toggle */}
-        {!cameraActive ? (
+          </>
+        )}
+        {events.length > 0 && (
           <button
-            onClick={async () => {
-              await startCamera();
-              if (sessionActive) {
-                startEmotionPolling();
-                startVisionPolling();
-              }
-            }}
-            className="text-xs px-3 py-1.5 rounded-lg border border-gold/20 text-gold/50 hover:text-gold/80 hover:bg-gold/5 transition-all"
+            onClick={handleExport}
+            className="border border-gold/20 rounded-xl px-4 py-3 font-display text-gold/50 text-sm tracking-wider transition-all hover:text-gold/80 hover:bg-gold/5"
           >
-            Enable camera
+            Export Storybook
           </button>
-        ) : (
-          <span className="flex items-center gap-1.5 text-xs text-emerald-400/60">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            Camera on
-            {detectedEmotion && <span className="text-gold/40">({detectedEmotion})</span>}
-          </span>
         )}
-
-        <div className="flex-1" />
-
-        {/* Session controls */}
-        {sessionActive && (
-          <span className="flex items-center gap-1.5 text-xs text-emerald-400/50">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            Music streaming
-          </span>
-        )}
-
-        <button
-          onClick={handleExport}
-          disabled={scenes.length === 0}
-          className="text-xs px-3 py-1.5 rounded-lg border border-gold/20 text-gold/50 hover:text-gold/80 hover:bg-gold/5 transition-all disabled:opacity-30"
-        >
-          Export storybook
-        </button>
-
-        <button
-          onClick={handleStop}
-          className="text-xs px-3 py-1.5 rounded-lg border border-red-500/20 text-red-400/50 hover:text-red-400/80 hover:bg-red-900/10 transition-all"
-        >
-          End story
-        </button>
       </div>
 
-      {/* Mini camera preview when active during story */}
-      {cameraActive && (
-        <div className="fixed bottom-4 right-4 w-32 h-24 rounded-xl overflow-hidden border border-gold/20 shadow-xl z-40">
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
-            className="w-full h-full object-cover"
+      {/* Info panels: Narration | Music Mood | Characters */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <NarrationPanel
+          lastInput={lastInput}
+          narration={narration}
+          location={location}
+          narrationAudioUrl={narrationAudioUrl}
+          isLoading={isBeating}
+        />
+        <MusicMoodPanel
+          mood={musicMood}
+          audioUrl={null}
+          hasLyria={health?.has_lyria ?? false}
+        />
+        <CharacterPanel profiles={cameraProfiles} />
+      </div>
+
+      {/* Story beat input */}
+      <div className="space-y-3">
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={beatInput}
+            onChange={(e) => setBeatInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && !isBeating && handleBeat()}
+            placeholder='What happens next? "The dragon falls asleep..."'
+            disabled={isBeating}
+            className="flex-1 bg-[#12121f] border border-gold/20 rounded-xl px-4 py-3 text-parchment placeholder:text-parchment/20 font-body text-base focus:outline-none focus:border-gold/50 focus:shadow-[0_0_20px_rgba(201,169,110,0.1)] transition-all disabled:opacity-50"
           />
+          <button
+            onClick={handleBeat}
+            disabled={isBeating || (health !== null && !health.has_gemini)}
+            className="bg-gold/10 hover:bg-gold/20 border border-gold/30 rounded-xl px-5 py-3 font-display text-gold text-sm tracking-wider transition-all disabled:opacity-30 disabled:cursor-not-allowed hover:shadow-[0_0_20px_rgba(201,169,110,0.15)]"
+          >
+            {isBeating ? <span className="animate-pulse">...</span> : 'Tell'}
+          </button>
         </div>
-      )}
+
+        {/* Voice input */}
+        {hasSpeech && (
+          <div className="flex gap-2">
+            <button
+              onClick={handleMicClick}
+              disabled={micDisabled}
+              className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl border font-display text-sm tracking-wider transition-all ${
+                micState === 'recording'
+                  ? 'bg-red-900/30 border-red-500/50 text-red-400 animate-pulse shadow-[0_0_20px_rgba(239,68,68,0.2)]'
+                  : micState === 'transcribing'
+                    ? 'bg-amber-900/20 border-amber-500/30 text-amber-400'
+                    : 'bg-[#12121f] border-gold/20 text-gold/70 hover:bg-gold/5 hover:border-gold/30'
+              } disabled:opacity-30`}
+            >
+              <span className="text-lg">
+                {micState === 'recording' ? '🔴' : micState === 'transcribing' ? '⏳' : '🎙️'}
+              </span>
+              {micState === 'recording'
+                ? 'Stop Recording'
+                : micState === 'transcribing'
+                  ? 'Transcribing...'
+                  : 'Speak Your Story'}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Event log */}
+      <EventLog events={events.map((e) => ({ ...e, diceRoll: null }))} />
     </div>
   );
+}
+
+// ── Sub-components ──
+
+/** Child name, age, theme, and language configuration step. */
+function ConfigureStep({
+  childName,
+  childAge,
+  themeInput,
+  language,
+  error,
+  onNameChange,
+  onAgeChange,
+  onThemeChange,
+  onLanguageChange,
+  onSubmit,
+}: {
+  childName: string;
+  childAge: string;
+  themeInput: string;
+  language: string;
+  error: string | null;
+  onNameChange: (v: string) => void;
+  onAgeChange: (v: string) => void;
+  onThemeChange: (v: string) => void;
+  onLanguageChange: (v: string) => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <div className="max-w-md mx-auto space-y-6 animate-fade-in">
+      <div className="text-center">
+        <h2 className="font-display text-gold text-2xl tracking-[0.12em] uppercase">
+          Story Setup
+        </h2>
+        <p className="text-parchment/50 font-body text-sm mt-2">
+          Tell us about the hero of tonight&apos;s story.
+        </p>
+      </div>
+
+      {error && (
+        <div className="rounded-lg bg-red-900/20 border border-red-600/30 px-4 py-2 text-center text-red-200 text-sm">
+          {error}
+        </div>
+      )}
+
+      <div className="space-y-4">
+        <div>
+          <label className="block text-gold/60 text-xs font-mono uppercase tracking-wider mb-1">
+            Child&apos;s name
+          </label>
+          <input
+            type="text"
+            value={childName}
+            onChange={(e) => onNameChange(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && onSubmit()}
+            placeholder="e.g. Luna"
+            className="w-full bg-[#12121f] border border-gold/20 rounded-xl px-4 py-3 text-parchment placeholder:text-parchment/20 font-body text-base focus:outline-none focus:border-gold/50 transition-all"
+          />
+        </div>
+        <div>
+          <label className="block text-gold/60 text-xs font-mono uppercase tracking-wider mb-1">
+            Age
+          </label>
+          <input
+            type="number"
+            value={childAge}
+            onChange={(e) => onAgeChange(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && onSubmit()}
+            placeholder="e.g. 5"
+            min={1}
+            max={18}
+            className="w-full bg-[#12121f] border border-gold/20 rounded-xl px-4 py-3 text-parchment placeholder:text-parchment/20 font-body text-base focus:outline-none focus:border-gold/50 transition-all"
+          />
+        </div>
+        <div>
+          <label className="block text-gold/60 text-xs font-mono uppercase tracking-wider mb-1">
+            Story theme (optional)
+          </label>
+          <input
+            type="text"
+            value={themeInput}
+            onChange={(e) => onThemeChange(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && onSubmit()}
+            placeholder="e.g. forest adventure, under the sea, space..."
+            className="w-full bg-[#12121f] border border-gold/20 rounded-xl px-4 py-3 text-parchment placeholder:text-parchment/20 font-body text-base focus:outline-none focus:border-gold/50 transition-all"
+          />
+        </div>
+        <div className="flex items-center gap-3">
+          <label className="text-gold/50 text-xs font-mono shrink-0">Language:</label>
+          <select
+            value={language}
+            onChange={(e) => onLanguageChange(e.target.value)}
+            className="bg-[#12121f] border border-gold/20 rounded-lg px-3 py-1.5 text-parchment text-sm font-body focus:outline-none focus:border-gold/50"
+          >
+            <option value="en">English</option>
+            <option value="es">Spanish</option>
+            <option value="fr">French</option>
+            <option value="sw">Swahili</option>
+            <option value="ru">Russian</option>
+            <option value="de">German</option>
+            <option value="it">Italian</option>
+            <option value="pt">Portuguese</option>
+            <option value="ja">Japanese</option>
+            <option value="ko">Korean</option>
+            <option value="zh">Chinese</option>
+            <option value="ar">Arabic</option>
+            <option value="hi">Hindi</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="flex justify-center">
+        <button
+          onClick={onSubmit}
+          className="bg-gold/10 hover:bg-gold/20 border border-gold/40 rounded-xl px-8 py-3 font-display text-gold text-sm tracking-wider transition-all hover:shadow-[0_0_20px_rgba(201,169,110,0.15)]"
+        >
+          Begin Story
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Helpers ──
+
+function decodeBase64ToArrayBuffer(base64: string): ArrayBuffer {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
 }

@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from 'react';
 
 interface StoryWorldProps {
   imageUrl: string | null;
-  imageSource?: 'nanobanana' | 'imagen' | 'placeholder' | null;
+  imageSource?: 'nanobanana' | 'imagen' | 'imagen_custom' | null;
   isLoading: boolean;
   eventNumber: number;
   /** Optional location label overlay */
@@ -95,11 +95,15 @@ export default function StoryWorld({
           </span>
         )}
         <div className="flex items-center gap-2">
-          {imageSource && (
+          {imageSource === 'imagen_custom' ? (
+            <span className="bg-gold/20 backdrop-blur-sm px-2 py-0.5 rounded text-[10px] font-mono text-gold uppercase tracking-wider">
+              Personalized
+            </span>
+          ) : imageSource ? (
             <span className="bg-black/50 backdrop-blur-sm px-2 py-0.5 rounded text-[10px] font-mono text-gold/90 uppercase">
               AI
             </span>
-          )}
+          ) : null}
           {eventNumber > 0 && (
             <span className="bg-black/50 backdrop-blur-sm px-2.5 py-0.5 rounded-full text-xs font-mono text-parchment/80">
               Scene {eventNumber}
