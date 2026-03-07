@@ -11,7 +11,7 @@ interface CameraRecognitionPanelProps {
   /** Callback to request camera (parent starts stream and passes videoRef or sets showFeed) */
   onRequestCamera?: () => void;
   /** Optional video stream for preview */
-  videoRef?: React.RefObject<HTMLVideoElement | null>;
+  videoRef?: React.RefObject<HTMLVideoElement>;
 }
 
 export default function CameraRecognitionPanel({

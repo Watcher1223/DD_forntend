@@ -36,7 +36,7 @@ interface GameState {
   narration: string;
   narrationAudioUrl: string | null;
   sceneImage: string | null;
-  imageSource: 'nanobanana' | 'imagen' | null;
+  imageSource: 'nanobanana' | 'imagen' | 'placeholder' | null;
   diceValue: number | null;
   musicMood: string;
   musicUrl: string | null;

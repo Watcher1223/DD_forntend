@@ -11,30 +11,33 @@ export interface HealthResponse {
   has_lyria: boolean;
   has_vision: boolean;
   has_speech: boolean;
+  has_livekit?: boolean;
+  has_subject_customization?: boolean;
 }
 
 export interface ActionImage {
   imageUrl: string;
-  source: 'nanobanana' | 'imagen';
+  source: 'nanobanana' | 'imagen' | 'placeholder';
 }
 
 export interface ActionMusic {
   audioUrl: string;
   mood: string;
   description?: string;
-  source: 'lyria';
+  source: 'lyria' | 'preset';
 }
 
 export interface ActionResponse {
   narration: string;
-  narrationAudioUrl: string;
+  narrationAudioUrl?: string;
   diceRoll: number | null;
-  image: ActionImage;
-  music: ActionMusic;
-  location: string;
-  music_mood: string;
-  elapsed_ms: number;
-  event_number: number;
+  image?: ActionImage;
+  music?: ActionMusic;
+  location?: string;
+  music_mood?: string;
+  elapsed_ms?: number;
+  event_number?: number;
+  action?: string;
 }
 
 export interface CampaignEvent {
@@ -44,7 +47,7 @@ export interface CampaignEvent {
   scene_prompt?: string;
   music_mood: string;
   location: string;
-  timestamp: number;
+  timestamp?: number;
 }
 
 export interface CampaignResponse {
@@ -60,7 +63,7 @@ export interface DiceResponse {
   simulated: boolean;
 }
 
-export type StoryUpdateMessage = { type: 'story_update' } & ActionResponse;
+export type StoryUpdateMessage = { type: 'story_update'; action?: string } & ActionResponse;
 
 // ── Camera / Character Profiling ──
 
@@ -72,7 +75,6 @@ export interface CharacterAppearance {
   age_range: string;
 }
 
-/** Response from POST /api/camera/analyze */
 export interface CameraAnalyzeResponse {
   people: CharacterAppearance[];
   setting: string;
@@ -86,20 +88,18 @@ export interface CameraProfile {
   updated_at: number;
 }
 
-/** Response from POST /api/speech/transcribe */
 export interface SpeechTranscribeResponse {
   transcript: string;
+  detectedLanguage?: string;
   elapsed_ms: number;
 }
 
-/** Response from POST /api/camera/pair */
 export interface PairResponse {
   code: string;
   phoneUrl: string;
   expiresAt: number;
 }
 
-/** WebSocket message broadcast when profiles are updated (local or phone capture). */
 export interface ProfilesUpdatedMessage {
   type: 'profiles_updated';
   campaignId: number;
@@ -109,21 +109,21 @@ export interface ProfilesUpdatedMessage {
   stored: number;
 }
 
-/** Response from GET /api/camera/profiles */
 export interface CameraProfilesResponse {
   profiles: CameraProfile[];
 }
 
 // ── Bedtime story (Lyria RealTime) ──
 
-/** GET /api/story/status */
 export interface StoryStatusResponse {
   active: boolean;
+  userTheme?: string;
+  language?: string;
 }
 
-/** POST /api/story/beat response */
 export interface StoryBeatResponse {
   narration: string;
+  narrationAudioUrl?: string;
   scene_prompt?: string;
   theme?: string;
   mood?: string;
@@ -131,26 +131,54 @@ export interface StoryBeatResponse {
   emotion?: string;
   location?: string;
   event_number?: number;
+  language?: string;
+  image?: ActionImage;
 }
 
-/** POST /api/music/update body (all optional) */
 export interface MusicUpdateBody {
   theme?: string;
   genre?: string;
   mood?: string;
   intensity?: number;
   emotion?: string;
+  detected_events?: string[];
 }
 
-/** WebSocket message: audio_chunk */
 export interface AudioChunkMessage {
   type: 'audio_chunk';
-  payload: string; // base64 PCM
+  payload: string;
   sampleRate: number;
   channels: number;
 }
 
-/** WebSocket message: music_session_ended */
 export interface MusicSessionEndedMessage {
   type: 'music_session_ended';
+}
+
+export interface CharacterInjectionMessage {
+  type: 'character_injection';
+  narration: string;
+  scene_prompt?: string;
+  imageUrl?: string;
+  new_entrant_description?: string;
+}
+
+export interface StageVisionTickMessage {
+  type: 'stage_vision_tick';
+  people_count: number;
+  new_entrant: boolean;
+  setting?: string;
+}
+
+export interface StoryExportPage {
+  narration: string;
+  imageUrl?: string;
+  scene_prompt?: string;
+  learning_moment?: string;
+}
+
+export interface StoryExportResponse {
+  childName?: string;
+  learningGoals?: string[];
+  pages: StoryExportPage[];
 }

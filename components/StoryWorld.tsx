@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from 'react';
 
 interface StoryWorldProps {
   imageUrl: string | null;
-  imageSource?: 'nanobanana' | 'imagen' | null;
+  imageSource?: 'nanobanana' | 'imagen' | 'placeholder' | null;
   isLoading: boolean;
   eventNumber: number;
   /** Optional location label overlay */
