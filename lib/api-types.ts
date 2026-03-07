@@ -10,6 +10,7 @@ export interface HealthResponse {
   has_nanobanana: boolean;
   has_lyria: boolean;
   has_vision: boolean;
+  has_speech: boolean;
 }
 
 export interface ActionImage {
@@ -83,6 +84,29 @@ export interface CameraProfile {
   label: string;
   appearance: CharacterAppearance;
   updated_at: number;
+}
+
+/** Response from POST /api/speech/transcribe */
+export interface SpeechTranscribeResponse {
+  transcript: string;
+  elapsed_ms: number;
+}
+
+/** Response from POST /api/camera/pair */
+export interface PairResponse {
+  code: string;
+  phoneUrl: string;
+  expiresAt: number;
+}
+
+/** WebSocket message broadcast when profiles are updated (local or phone capture). */
+export interface ProfilesUpdatedMessage {
+  type: 'profiles_updated';
+  campaignId: number;
+  source: 'phone' | 'local';
+  people: CharacterAppearance[];
+  setting: string;
+  stored: number;
 }
 
 /** Response from GET /api/camera/profiles */

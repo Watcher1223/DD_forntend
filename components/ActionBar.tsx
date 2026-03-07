@@ -1,69 +1,112 @@
 'use client';
 
 import { useState, useRef, useCallback, useEffect } from 'react';
+import type { SpeechTranscribeResponse } from '@/lib/api-types';
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4300';
+
+type MicState = 'idle' | 'recording' | 'transcribing';
 
 interface ActionBarProps {
   onAction: (action: string, diceRoll: number | null, webcamFrame: string | null) => void;
   isProcessing: boolean;
   /** When true (e.g. Gemini not configured), actions return 503 — disable sending. */
   actionDisabled?: boolean;
+  /** When false, hide the microphone button entirely. */
+  hasSpeech?: boolean;
 }
 
-export default function ActionBar({ onAction, isProcessing, actionDisabled = false }: ActionBarProps) {
+/**
+ * Action input bar with text entry, voice recording (via backend Gemini STT),
+ * d20 roll, and webcam dice capture.
+ */
+export default function ActionBar({
+  onAction,
+  isProcessing,
+  actionDisabled = false,
+  hasSpeech = false,
+}: ActionBarProps) {
   const [textInput, setTextInput] = useState('');
-  const [isListening, setIsListening] = useState(false);
+  const [micState, setMicState] = useState<MicState>('idle');
   const [showWebcam, setShowWebcam] = useState(false);
   const [webcamReady, setWebcamReady] = useState(false);
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const recognitionRef = useRef<any>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const micStreamRef = useRef<MediaStream | null>(null);
 
-  // ── Speech Recognition ──
-  const startListening = useCallback(() => {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      alert('Speech recognition not supported in this browser. Use Chrome or Edge.');
-      return;
+  // ── Voice recording via MediaRecorder + backend transcription ──
+
+  const startRecording = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStreamRef.current = stream;
+
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm')
+        ? 'audio/webm'
+        : 'audio/mp4';
+      const recorder = new MediaRecorder(stream, { mimeType });
+      chunksRef.current = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
+
+      recorder.onstop = () => transcribeRecording(mimeType);
+
+      recorderRef.current = recorder;
+      recorder.start();
+      setMicState('recording');
+    } catch {
+      setMicState('idle');
     }
-
-    const recognition = new SpeechRecognition();
-    recognition.continuous = false;
-    recognition.interimResults = true;
-    recognition.lang = 'en-US';
-
-    recognition.onstart = () => setIsListening(true);
-    recognition.onend = () => setIsListening(false);
-
-    recognition.onresult = (event: any) => {
-      const transcript = Array.from(event.results)
-        .map((r: any) => r[0].transcript)
-        .join('');
-
-      setTextInput(transcript);
-
-      // If final result, auto-submit
-      if (event.results[event.results.length - 1].isFinal) {
-        setIsListening(false);
-        if (transcript.trim()) {
-          handleSubmit(transcript.trim());
-        }
-      }
-    };
-
-    recognition.onerror = () => setIsListening(false);
-
-    recognitionRef.current = recognition;
-    recognition.start();
   }, []);
 
-  const stopListening = () => {
-    if (recognitionRef.current) {
-      recognitionRef.current.stop();
-    }
-    setIsListening(false);
-  };
+  function stopRecording() {
+    recorderRef.current?.stop();
+    micStreamRef.current?.getTracks().forEach((t) => t.stop());
+    micStreamRef.current = null;
+  }
 
-  // ── Webcam ──
+  /** Encode recorded chunks to base64 and send to the backend for transcription. */
+  async function transcribeRecording(mimeType: string) {
+    setMicState('transcribing');
+
+    const blob = new Blob(chunksRef.current, { type: mimeType });
+    const base64 = await blobToDataUrl(blob);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/speech/transcribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ audio: base64 }),
+      });
+
+      if (!res.ok) throw new Error('Transcription failed');
+
+      const data = (await res.json()) as SpeechTranscribeResponse;
+      if (data.transcript) {
+        setTextInput(data.transcript);
+      }
+    } catch {
+      // Silently fail — user can still type manually
+    } finally {
+      setMicState('idle');
+    }
+  }
+
+  function handleMicClick() {
+    if (micState === 'recording') {
+      stopRecording();
+    } else if (micState === 'idle') {
+      startRecording();
+    }
+  }
+
+  // ── Webcam (dice capture) ──
+
   const startWebcam = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -76,7 +119,6 @@ export default function ActionBar({ onAction, isProcessing, actionDisabled = fal
       setShowWebcam(true);
     } catch (err) {
       console.error('Webcam error:', err);
-      // Send action without dice; backend can return a roll in the response
       handleDiceRoll(null);
     }
   };
@@ -95,7 +137,6 @@ export default function ActionBar({ onAction, isProcessing, actionDisabled = fal
 
   const handleDiceRoll = (frame: string | null) => {
     setShowWebcam(false);
-    // Stop webcam stream
     if (videoRef.current?.srcObject) {
       (videoRef.current.srcObject as MediaStream).getTracks().forEach(t => t.stop());
       setWebcamReady(false);
@@ -105,6 +146,8 @@ export default function ActionBar({ onAction, isProcessing, actionDisabled = fal
     onAction(action, null, frame);
     setTextInput('');
   };
+
+  // ── Submit helpers ──
 
   const handleSubmit = (overrideAction?: string) => {
     const action = overrideAction || textInput.trim();
@@ -119,14 +162,21 @@ export default function ActionBar({ onAction, isProcessing, actionDisabled = fal
     setTextInput('');
   };
 
-  // Cleanup webcam on unmount
+  // ── Cleanup on unmount ──
+
   useEffect(() => {
     return () => {
       if (videoRef.current?.srcObject) {
         (videoRef.current.srcObject as MediaStream).getTracks().forEach(t => t.stop());
       }
+      micStreamRef.current?.getTracks().forEach((t) => t.stop());
+      recorderRef.current = null;
     };
   }, []);
+
+  // ── Render ──
+
+  const micDisabled = isProcessing || actionDisabled || micState === 'transcribing';
 
   return (
     <div className="space-y-3">
@@ -156,21 +206,31 @@ export default function ActionBar({ onAction, isProcessing, actionDisabled = fal
 
       {/* Action buttons row */}
       <div className="flex gap-2">
-        {/* Mic button */}
-        <button
-          onClick={isListening ? stopListening : startListening}
-          disabled={isProcessing || actionDisabled}
-          className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl border font-display text-sm tracking-wider transition-all ${
-            isListening
-              ? 'bg-red-900/30 border-red-500/50 text-red-400 animate-pulse shadow-[0_0_20px_rgba(239,68,68,0.2)]'
-              : 'bg-[#12121f] border-gold/20 text-gold/70 hover:bg-gold/5 hover:border-gold/30'
-          } disabled:opacity-30`}
-        >
-          <span className="text-lg">{isListening ? '🔴' : '🎙️'}</span>
-          {isListening ? 'Listening...' : 'Speak Action'}
-        </button>
+        {/* Mic button — only shown when backend supports speech */}
+        {hasSpeech && (
+          <button
+            onClick={handleMicClick}
+            disabled={micDisabled}
+            className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl border font-display text-sm tracking-wider transition-all ${
+              micState === 'recording'
+                ? 'bg-red-900/30 border-red-500/50 text-red-400 animate-pulse shadow-[0_0_20px_rgba(239,68,68,0.2)]'
+                : micState === 'transcribing'
+                  ? 'bg-amber-900/20 border-amber-500/30 text-amber-400'
+                  : 'bg-[#12121f] border-gold/20 text-gold/70 hover:bg-gold/5 hover:border-gold/30'
+            } disabled:opacity-30`}
+          >
+            <span className="text-lg">
+              {micState === 'recording' ? '🔴' : micState === 'transcribing' ? '⏳' : '🎙️'}
+            </span>
+            {micState === 'recording'
+              ? 'Stop Recording'
+              : micState === 'transcribing'
+                ? 'Transcribing...'
+                : 'Speak Action'}
+          </button>
+        )}
 
-        {/* Roll d20 (backend returns roll in action response) */}
+        {/* Roll d20 */}
         <button
           onClick={handleQuickRoll}
           disabled={isProcessing || actionDisabled}
@@ -222,4 +282,16 @@ export default function ActionBar({ onAction, isProcessing, actionDisabled = fal
       <canvas ref={canvasRef} className="hidden" />
     </div>
   );
+}
+
+// ── Helpers ──
+
+/** Convert a Blob to a data URL (e.g. "data:audio/webm;base64,..."). */
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
 }

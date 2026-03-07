@@ -94,9 +94,13 @@ export default function HomePage() {
 
       ws.onmessage = (evt) => {
         try {
-          const data = JSON.parse(evt.data) as StoryUpdateMessage;
+          const data = JSON.parse(evt.data);
           if (data.type === 'story_update') {
-            applyStoryUpdate(data);
+            applyStoryUpdate(data as StoryUpdateMessage);
+          } else if (data.type === 'profiles_updated') {
+            console.log(
+              `[Living Worlds] Profiles updated via ${data.source} — ${data.stored} stored`
+            );
           }
         } catch {
           // ignore parse errors
@@ -484,6 +488,7 @@ export default function HomePage() {
                 onAction={handleAction}
                 isProcessing={game.isProcessing}
                 actionDisabled={game.health !== null && !game.health.has_gemini}
+                hasSpeech={game.health?.has_speech ?? false}
               />
             </div>
 
