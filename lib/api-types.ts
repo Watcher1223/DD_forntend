@@ -89,3 +89,44 @@ export interface CameraProfile {
 export interface CameraProfilesResponse {
   profiles: CameraProfile[];
 }
+
+// ── Bedtime story (Lyria RealTime) ──
+
+/** GET /api/story/status */
+export interface StoryStatusResponse {
+  active: boolean;
+}
+
+/** POST /api/story/beat response */
+export interface StoryBeatResponse {
+  narration: string;
+  scene_prompt?: string;
+  theme?: string;
+  mood?: string;
+  intensity?: number;
+  emotion?: string;
+  location?: string;
+  event_number?: number;
+}
+
+/** POST /api/music/update body (all optional) */
+export interface MusicUpdateBody {
+  theme?: string;
+  genre?: string;
+  mood?: string;
+  intensity?: number;
+  emotion?: string;
+}
+
+/** WebSocket message: audio_chunk */
+export interface AudioChunkMessage {
+  type: 'audio_chunk';
+  payload: string; // base64 PCM
+  sampleRate: number;
+  channels: number;
+}
+
+/** WebSocket message: music_session_ended */
+export interface MusicSessionEndedMessage {
+  type: 'music_session_ended';
+}

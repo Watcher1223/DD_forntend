@@ -8,15 +8,24 @@ const config: Config = {
   theme: {
     extend: {
       fontFamily: {
-        display: ['Cinzel', 'serif'],
-        body: ['Crimson Text', 'Georgia', 'serif'],
+        display: ['Playfair Display', 'Cinzel', 'serif'],
+        story: ['Lora', 'Crimson Text', 'Georgia', 'serif'],
+        body: ['Inter', 'system-ui', 'sans-serif'],
         mono: ['JetBrains Mono', 'monospace'],
       },
       colors: {
-        parchment: '#f4e8c1',
-        ink: '#1a1a2e',
+        parchment: '#fef3c7',
+        'parchment-dim': '#f4e8c1',
+        ink: '#1e293b',
         blood: '#8b0000',
-        gold: '#c9a96e',
+        gold: '#d4a853',
+        'gold-soft': '#e8c97a',
+        lavender: '#a78bfa',
+        'lavender-soft': '#c4b5fd',
+        'soft-pink': '#f9a8d4',
+        'soft-pink-muted': '#fbcfe8',
+        midnight: '#0f172a',
+        'midnight-light': '#1e293b',
         ember: '#e25822',
       },
       animation: {

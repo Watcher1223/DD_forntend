@@ -1,15 +1,25 @@
 @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700;900&family=Crimson+Text:ital,wght@0,400;0,600;0,700;1,400&family=JetBrains+Mono:wght@400&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&family=Inter:wght@400;500;600&family=Lora:ital,wght@0,400;0,600;1,400&display=swap');
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  --bg-dark: #0a0a12;
-  --bg-mid: #12121f;
-  --bg-card: #1a1a2e;
-  --gold: #c9a96e;
-  --parchment: #f4e8c1;
+  /* Storybook palette: Pixar meets Twitch */
+  --midnight: #0f172a;
+  --midnight-light: #1e293b;
+  --gold: #d4a853;
+  --gold-soft: #e8c97a;
+  --lavender: #a78bfa;
+  --lavender-soft: #c4b5fd;
+  --soft-pink: #f9a8d4;
+  --soft-pink-muted: #fbcfe8;
+  --parchment: #fef3c7;
+  --parchment-dim: #f4e8c1;
+  --bg-dark: #0f172a;
+  --bg-mid: #1e293b;
+  --bg-card: #334155;
 }
 
 html { scroll-behavior: smooth; }
@@ -17,7 +27,7 @@ html { scroll-behavior: smooth; }
 body {
   background: var(--bg-dark);
   color: var(--parchment);
-  font-family: 'Crimson Text', Georgia, serif;
+  font-family: 'Inter', system-ui, sans-serif;
 }
 
 /* Ambient vignette overlay */
@@ -60,6 +70,25 @@ body {
 /* Mood indicator pulse */
 .mood-pulse {
   animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* Storybook page flip when scene changes */
+@keyframes pageTurn {
+  0% { transform: perspective(1200px) rotateY(0deg); opacity: 1; }
+  50% { transform: perspective(1200px) rotateY(-90deg); opacity: 0.3; }
+  100% { transform: perspective(1200px) rotateY(0deg); opacity: 1; }
+}
+.page-turn {
+  animation: pageTurn 0.6s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+/* Simple waveform bars for music mood */
+@keyframes waveform {
+  0%, 100% { height: 30%; }
+  50% { height: 100%; }
+}
+.waveform-bar {
+  animation: waveform 1.2s ease-in-out infinite;
 }
 
 /* Scrollbar styling */

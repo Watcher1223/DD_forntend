@@ -1,13 +1,16 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import SceneArtwork from '@/components/SceneArtwork';
-import NarrationBox from '@/components/NarrationBox';
+import StoryWorld from '@/components/StoryWorld';
+import NarrationPanel from '@/components/NarrationPanel';
+import MusicMoodPanel from '@/components/MusicMoodPanel';
+import CharacterPanel from '@/components/CharacterPanel';
+import CameraRecognitionPanel from '@/components/CameraRecognitionPanel';
 import DiceDisplay from '@/components/DiceDisplay';
-import MusicMood from '@/components/MusicMood';
 import ActionBar from '@/components/ActionBar';
 import EventLog from '@/components/EventLog';
 import CharacterSetup from '@/components/CharacterSetup';
+import BedtimeStoryView from '@/components/BedtimeStoryView';
 import type {
   HealthResponse,
   ActionResponse,
@@ -15,6 +18,7 @@ import type {
   DiceResponse,
   StoryUpdateMessage,
   CampaignEvent,
+  CameraProfile,
 } from '@/lib/api-types';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4300';
@@ -68,10 +72,15 @@ export default function HomePage() {
     showCharacterSetup: true,
   });
 
+  type AppMode = 'bedtime' | 'dungeon';
+  const [mode, setMode] = useState<AppMode>('bedtime');
+  const [cameraProfiles, setCameraProfiles] = useState<CameraProfile[]>([]);
+
   const wsRef = useRef<WebSocket | null>(null);
 
-  // ── WebSocket connection (real-time story_update broadcasts) ──
+  // ── WebSocket connection (only for dungeon mode story_update) ──
   useEffect(() => {
+    if (mode !== 'dungeon') return;
     const wsUrl = API_BASE.replace(/^http/, 'ws');
     let ws: WebSocket;
     let reconnectTimer: NodeJS.Timeout;
@@ -112,7 +121,7 @@ export default function HomePage() {
       clearTimeout(reconnectTimer);
       ws?.close();
     };
-  }, []);
+  }, [mode]);
 
   // ── Health check on load ──
   useEffect(() => {
@@ -166,6 +175,15 @@ export default function HomePage() {
         // Backend not running or no campaign — that's fine
       });
   }, []);
+
+  // ── Load camera profiles when in dungeon mode ──
+  useEffect(() => {
+    if (mode !== 'dungeon') return;
+    fetch(`${API_BASE}/api/camera/profiles`)
+      .then((r) => r.ok ? r.json() : Promise.reject())
+      .then((data: { profiles: CameraProfile[] }) => setCameraProfiles(data.profiles || []))
+      .catch(() => setCameraProfiles([]));
+  }, [mode]);
 
   const applyStoryUpdate = (data: ActionResponse | StoryUpdateMessage) => {
     const imageUrl = data.image?.imageUrl ?? null;
@@ -333,6 +351,7 @@ export default function HomePage() {
         musicPlayRequest: null,
         showCharacterSetup: true,
       }));
+      setCameraProfiles([]);
     } catch {
       // ignore
     }
@@ -340,25 +359,59 @@ export default function HomePage() {
 
   return (
     <main className="min-h-screen relative">
-      {/* Background atmosphere */}
-      <div className="fixed inset-0 bg-gradient-to-b from-[#0a0a14] via-[#12121f] to-[#0a0a14] -z-10" />
+      {/* Storybook atmosphere */}
+      <div className="fixed inset-0 bg-gradient-to-b from-midnight via-midnight-light/30 to-midnight -z-10" />
 
-      <div className="max-w-6xl mx-auto px-4 py-6 space-y-4">
-        {/* Header */}
+      <div className="max-w-7xl mx-auto px-4 py-4 space-y-4">
+        {/* Header + mode toggle */}
         <header className="text-center mb-2">
-          <h1 className="font-display text-gold text-3xl tracking-[0.15em] uppercase">
-            Living Worlds
+          <h1 className="font-display text-gold text-3xl tracking-[0.12em] uppercase">
+            🌙 The Magical Bedtime Adventure
           </h1>
-          <p className="text-parchment/30 text-xs tracking-[0.3em] uppercase mt-1">
-            Real-Time AI Dungeon Master
+          <p className="text-parchment-dim/60 text-xs tracking-[0.2em] uppercase mt-1 font-body">
+            {mode === 'bedtime' ? 'Bedtime Story' : 'Real-Time AI Dungeon Master'}
           </p>
-          <div className="flex items-center justify-center gap-4 mt-2">
-            <div className="h-px w-16 bg-gold/20" />
-            <span className="text-gold/30 text-xs font-mono">Event {game.eventNumber}</span>
-            <div className="h-px w-16 bg-gold/20" />
+
+          {/* Toggle: Bedtime story (default) | Dungeon Master */}
+          <div className="flex items-center justify-center gap-2 mt-4">
+            <button
+              type="button"
+              onClick={() => setMode('bedtime')}
+              className={`rounded-lg border px-4 py-2 text-xs font-display tracking-wider transition-all ${
+                mode === 'bedtime'
+                  ? 'bg-gold/20 border-gold/50 text-gold'
+                  : 'border-gold/20 text-parchment-dim/50 hover:text-parchment-dim/70 hover:border-gold/30'
+              }`}
+            >
+              Bedtime story
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode('dungeon')}
+              className={`rounded-lg border px-4 py-2 text-xs font-display tracking-wider transition-all ${
+                mode === 'dungeon'
+                  ? 'bg-gold/20 border-gold/50 text-gold'
+                  : 'border-gold/20 text-parchment-dim/50 hover:text-parchment-dim/70 hover:border-gold/30'
+              }`}
+            >
+              Dungeon Master
+            </button>
           </div>
+
+          {mode === 'dungeon' && (
+            <div className="flex items-center justify-center gap-4 mt-2">
+              <div className="h-px w-16 bg-gold/20" />
+              <span className="text-gold/50 text-xs font-mono">Event {game.eventNumber}</span>
+              <div className="h-px w-16 bg-gold/20" />
+            </div>
+          )}
         </header>
 
+        {/* Bedtime story mode (default) */}
+        {mode === 'bedtime' ? (
+          <BedtimeStoryView />
+        ) : (
+          <>
         {/* Character setup gate — shown before the game when vision is available */}
         {game.showCharacterSetup && game.health === null && !game.error ? (
           <div className="flex justify-center py-16">
@@ -367,9 +420,10 @@ export default function HomePage() {
         ) : game.showCharacterSetup && game.health?.has_vision ? (
           <CharacterSetup
             hasVision
-            onComplete={() =>
-              setGame((prev) => ({ ...prev, showCharacterSetup: false }))
-            }
+            onComplete={(profiles) => {
+              setGame((prev) => ({ ...prev, showCharacterSetup: false }));
+              setCameraProfiles(profiles);
+            }}
             onSkip={() => setGame((prev) => ({ ...prev, showCharacterSetup: false }))}
           />
         ) : (
@@ -391,70 +445,77 @@ export default function HomePage() {
               </div>
             )}
 
-            {/* Main grid */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-              {/* Left column — Scene artwork */}
-              <div className="lg:col-span-2">
-                <SceneArtwork
-                  imageUrl={game.sceneImage}
-                  imageSource={game.imageSource}
-                  isLoading={game.isProcessing}
-                  eventNumber={game.eventNumber}
-                />
-              </div>
+            {/* 1. Story World (main) */}
+            <StoryWorld
+              imageUrl={game.sceneImage}
+              imageSource={game.imageSource}
+              isLoading={game.isProcessing}
+              eventNumber={game.eventNumber}
+              location={game.location}
+            />
 
-              {/* Right column — Dice + Music */}
-              <div className="flex flex-col gap-4">
-                <DiceDisplay value={game.diceValue} isRolling={game.isRolling} />
-                <MusicMood
-                  mood={game.musicMood}
-                  audioUrl={game.musicUrl}
-                  hasLyria={game.health?.has_lyria ?? true}
-                  musicPlayRequest={game.musicPlayRequest}
-                />
-              </div>
+            {/* 2. Bottom bar: Narration | Music Mood | Characters | Camera */}
+            <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-3">
+              <NarrationPanel
+                lastInput={game.events[game.events.length - 1]?.action}
+                narration={game.narration}
+                location={game.location}
+                narrationAudioUrl={game.narrationAudioUrl}
+                isLoading={game.isProcessing}
+              />
+              <MusicMoodPanel
+                mood={game.musicMood}
+                audioUrl={game.musicUrl}
+                hasLyria={game.health?.has_lyria ?? true}
+                musicPlayRequest={game.musicPlayRequest}
+              />
+              <CharacterPanel profiles={cameraProfiles} />
+              <CameraRecognitionPanel
+                detectedLabels={cameraProfiles.map((p) => p.label)}
+              />
             </div>
 
-            {/* Narration */}
-            <NarrationBox
-              text={game.narration}
-              location={game.location}
-              narrationAudioUrl={game.narrationAudioUrl}
-              isLoading={game.isProcessing}
-            />
+            {/* Action bar + dice */}
+            <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center">
+              <div className="hidden sm:block shrink-0">
+                <DiceDisplay value={game.diceValue} isRolling={game.isRolling} />
+              </div>
+              <ActionBar
+                onAction={handleAction}
+                isProcessing={game.isProcessing}
+                actionDisabled={game.health !== null && !game.health.has_gemini}
+              />
+            </div>
 
-            {/* Action bar */}
-            <ActionBar
-              onAction={handleAction}
-              isProcessing={game.isProcessing}
-              actionDisabled={game.health !== null && !game.health.has_gemini}
-            />
-
-            {/* Event log */}
+            {/* Event log (collapsible feel) */}
             <EventLog events={game.events} />
           </>
         )}
+          </>
+        )}
 
-        {/* Footer controls */}
+        {/* Footer controls — show for both modes */}
         <div className="flex items-center justify-between pt-2">
-          <span className="text-parchment/20 text-[10px] font-mono">
+          <span className="text-parchment-dim/50 text-[10px] font-mono">
             Powered by Gemini 3.1 + NanoBanana 2 + Lyria
             {' · '}
             <a
               href={`${API_BASE}/test-audio.html`}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-gold/40 hover:text-gold transition-colors"
+              className="text-gold/60 hover:text-gold transition-colors"
             >
               Test audio
             </a>
           </span>
-          <button
-            onClick={handleReset}
-            className="text-parchment/20 hover:text-red-400/60 text-[10px] font-mono transition-colors"
-          >
-            Reset Campaign
-          </button>
+          {mode === 'dungeon' && (
+            <button
+              onClick={handleReset}
+              className="text-parchment-dim/50 hover:text-soft-pink-muted text-[10px] font-mono transition-colors"
+            >
+              Reset Campaign
+            </button>
+          )}
         </div>
       </div>
     </main>
