@@ -15,12 +15,18 @@ import type {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4300';
 const WS_URL = API_BASE.replace(/^http/, 'ws');
+const OVERSHOOT_WS_URL = process.env.NEXT_PUBLIC_OVERSHOOT_WS_URL || '';
 
 // ── Timing constants ──
 const EMOTION_POLL_MS = 4000;
 const VISION_POLL_MS = 6000;
 const AUTO_BEAT_MS = 8000;
 const FACE_DETECT_DELAY_MS = 2000;
+const OVERSHOOT_EMOTION_MS = 2000;
+const OVERSHOOT_OBJECT_MS = 5000;
+const OVERSHOOT_SETUP_OBJECT_MS = 3000;
+const FACE_CAPTURE_INTERVAL_MS = 1500;
+const FACE_CAPTURE_TOTAL = 4;
 
 type Phase = 'setup' | 'playing' | 'export';
 
@@ -77,6 +83,18 @@ export default function BedtimeStoryView() {
   const [isListening, setIsListening] = useState(false);
   const [micState, setMicState] = useState<'idle' | 'recording' | 'transcribing'>('idle');
 
+  // ── Multi-frame face capture state ──
+  const [faceCaptureProgress, setFaceCaptureProgress] = useState<number>(0); // 0 = not capturing, 1-4 = in progress
+
+  // ── Continuous speech state ──
+  const [liveTranscript, setLiveTranscript] = useState('');
+  const [speechSupported, setSpeechSupported] = useState(false);
+  const [speechActive, setSpeechActive] = useState(false);
+  const [isNarrationPlaying, setIsNarrationPlaying] = useState(false);
+
+  // ── Overshoot state ──
+  const [overshootConnected, setOvershootConnected] = useState(false);
+
   // ── Refs ──
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -95,10 +113,18 @@ export default function BedtimeStoryView() {
   const micStreamRef = useRef<MediaStream | null>(null);
   const beatingRef = useRef(false);
   const activeRef = useRef(false);
+  const faceCaptureTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const overshootWsRef = useRef<WebSocket | null>(null);
+  const overshootEmotionIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const overshootObjectIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const overshootSetupObjectIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const speechRecognitionRef = useRef<any>(null);
+  const isNarrationPlayingRef = useRef(false);
 
   // Keep refs in sync
   useEffect(() => { activeRef.current = active; }, [active]);
   useEffect(() => { beatingRef.current = isBeating; }, [isBeating]);
+  useEffect(() => { isNarrationPlayingRef.current = isNarrationPlaying; }, [isNarrationPlaying]);
 
   // ── Health check ──
   useEffect(() => {
@@ -146,7 +172,7 @@ export default function BedtimeStoryView() {
     return () => stopCamera();
   }, [phase]);
 
-  // ── Auto-detect face once camera is ready ──
+  // ── Auto-detect face once camera is ready + multi-frame capture ──
   useEffect(() => {
     if (cameraReady && phase === 'setup' && !faceDetected) {
       const detect = () => {
@@ -164,8 +190,34 @@ export default function BedtimeStoryView() {
           .then((data) => {
             if (data.people && data.people.length > 0) {
               setFaceDetected(true);
+              setFaceCaptureProgress(1);
               // Also try to detect a doll/toy in the same frame
               detectDoll(frame);
+              // Capture 3 more frames at 1.5s intervals for Imagen subject customization
+              let capturedCount = 1;
+              const captureNext = () => {
+                capturedCount++;
+                if (capturedCount > FACE_CAPTURE_TOTAL) {
+                  setFaceCaptureProgress(0);
+                  return;
+                }
+                setFaceCaptureProgress(capturedCount);
+                const nextFrame = captureFrame();
+                if (nextFrame) {
+                  fetch(`${API_BASE}/api/camera/analyze`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ frame: nextFrame }),
+                  }).catch(() => {});
+                }
+                if (capturedCount < FACE_CAPTURE_TOTAL) {
+                  faceCaptureTimeoutRef.current = setTimeout(captureNext, FACE_CAPTURE_INTERVAL_MS);
+                } else {
+                  // Final capture done
+                  faceCaptureTimeoutRef.current = setTimeout(() => setFaceCaptureProgress(0), 500);
+                }
+              };
+              faceCaptureTimeoutRef.current = setTimeout(captureNext, FACE_CAPTURE_INTERVAL_MS);
             } else {
               faceDetectTimeoutRef.current = setTimeout(detect, FACE_DETECT_DELAY_MS);
             }
@@ -178,12 +230,163 @@ export default function BedtimeStoryView() {
     }
     return () => {
       if (faceDetectTimeoutRef.current) clearTimeout(faceDetectTimeoutRef.current);
+      if (faceCaptureTimeoutRef.current) clearTimeout(faceCaptureTimeoutRef.current);
     };
   }, [cameraReady, phase, faceDetected]);
 
-  // ── Emotion polling while playing ──
+  // ── Overshoot WebSocket helpers ──
+  function sendFrameToOvershoot(prompt: string, onResult: (text: string) => void) {
+    const ws = overshootWsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const frame = captureFrame();
+    if (!frame) return;
+    // Overshoot expects: { image: base64, prompt: string }
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const handler = (evt: MessageEvent) => {
+      try {
+        const msg = JSON.parse(typeof evt.data === 'string' ? evt.data : evt.data.toString());
+        if (msg.requestId === requestId && msg.result) {
+          ws.removeEventListener('message', handler);
+          onResult(msg.result);
+        }
+      } catch { /* ignore */ }
+    };
+    ws.addEventListener('message', handler);
+    // Auto-cleanup after 10s
+    setTimeout(() => ws.removeEventListener('message', handler), 10000);
+    ws.send(JSON.stringify({ type: 'analyze', image: frame, prompt, requestId }));
+  }
+
+  // ── Overshoot WebSocket connection (playing phase) ──
   useEffect(() => {
-    if (phase === 'playing' && active) {
+    if (!OVERSHOOT_WS_URL || phase !== 'playing' || !active) return;
+    const ws = new WebSocket(OVERSHOOT_WS_URL);
+    ws.onopen = () => {
+      overshootWsRef.current = ws;
+      setOvershootConnected(true);
+    };
+    ws.onclose = () => {
+      overshootWsRef.current = null;
+      setOvershootConnected(false);
+    };
+    ws.onerror = () => {
+      overshootWsRef.current = null;
+      setOvershootConnected(false);
+    };
+    return () => {
+      ws.close();
+      overshootWsRef.current = null;
+      setOvershootConnected(false);
+    };
+  }, [phase, active]);
+
+  // ── Overshoot emotion detection (every ~2s during playing) ──
+  useEffect(() => {
+    if (phase !== 'playing' || !active || !overshootConnected) return;
+    overshootEmotionIntervalRef.current = setInterval(() => {
+      sendFrameToOvershoot(
+        'In one word or short phrase, what is the person doing or feeling? Examples: laughing, yawning, scared, happy, sleepy, neutral, excited, sad.',
+        (text) => {
+          fetch(`${API_BASE}/api/story/vision-event`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text }),
+          })
+            .then((r) => r.json())
+            .then((data) => {
+              if (data.emotion) setCurrentEmotion(data.emotion);
+              if (data.mood) setMusicMood(data.mood);
+            })
+            .catch(() => {});
+        },
+      );
+    }, OVERSHOOT_EMOTION_MS);
+    return () => {
+      if (overshootEmotionIntervalRef.current) clearInterval(overshootEmotionIntervalRef.current);
+    };
+  }, [phase, active, overshootConnected]);
+
+  // ── Overshoot object/doll detection (every ~5s during playing) ──
+  useEffect(() => {
+    if (phase !== 'playing' || !active || !overshootConnected) return;
+    overshootObjectIntervalRef.current = setInterval(() => {
+      sendFrameToOvershoot(
+        "Describe any toy, doll, or stuffed animal in a few words, or say 'no toy'.",
+        (text) => {
+          fetch(`${API_BASE}/api/story/vision-object`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text }),
+          })
+            .then((r) => r.json())
+            .then((data) => {
+              if (data.set && data.protagonist_description) {
+                setDollDetected(data.protagonist_description);
+              }
+            })
+            .catch(() => {});
+        },
+      );
+    }, OVERSHOOT_OBJECT_MS);
+    return () => {
+      if (overshootObjectIntervalRef.current) clearInterval(overshootObjectIntervalRef.current);
+    };
+  }, [phase, active, overshootConnected]);
+
+  // ── Overshoot doll detection during setup phase (every ~3s until found) ──
+  useEffect(() => {
+    if (phase !== 'setup' || !OVERSHOOT_WS_URL || !cameraReady || dollDetected) return;
+    // Connect to Overshoot for setup-phase doll scanning
+    const ws = new WebSocket(OVERSHOOT_WS_URL);
+    let setupWs: WebSocket | null = ws;
+    ws.onopen = () => {
+      overshootSetupObjectIntervalRef.current = setInterval(() => {
+        if (!setupWs || setupWs.readyState !== WebSocket.OPEN) return;
+        const frame = captureFrame();
+        if (!frame) return;
+        const requestId = `setup-${Date.now()}`;
+        const handler = (evt: MessageEvent) => {
+          try {
+            const msg = JSON.parse(typeof evt.data === 'string' ? evt.data : evt.data.toString());
+            if (msg.requestId === requestId && msg.result) {
+              setupWs?.removeEventListener('message', handler);
+              fetch(`${API_BASE}/api/story/vision-object`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: msg.result }),
+              })
+                .then((r) => r.json())
+                .then((data) => {
+                  if (data.set && data.protagonist_description) {
+                    setDollDetected(data.protagonist_description);
+                  }
+                })
+                .catch(() => {});
+            }
+          } catch { /* ignore */ }
+        };
+        ws.addEventListener('message', handler);
+        setTimeout(() => ws.removeEventListener('message', handler), 8000);
+        ws.send(JSON.stringify({
+          type: 'analyze',
+          image: frame,
+          prompt: "Describe any toy, doll, or stuffed animal in a few words, or say 'no toy'.",
+          requestId,
+        }));
+      }, OVERSHOOT_SETUP_OBJECT_MS);
+    };
+    ws.onerror = () => { setupWs = null; };
+    ws.onclose = () => { setupWs = null; };
+    return () => {
+      if (overshootSetupObjectIntervalRef.current) clearInterval(overshootSetupObjectIntervalRef.current);
+      setupWs = null;
+      ws.close();
+    };
+  }, [phase, cameraReady, dollDetected]);
+
+  // ── Emotion polling fallback (Gemini, when Overshoot not connected) ──
+  useEffect(() => {
+    if (phase === 'playing' && active && !overshootConnected) {
       emotionIntervalRef.current = setInterval(() => {
         const frame = captureFrame();
         if (!frame) return;
@@ -203,7 +406,7 @@ export default function BedtimeStoryView() {
     return () => {
       if (emotionIntervalRef.current) clearInterval(emotionIntervalRef.current);
     };
-  }, [phase, active]);
+  }, [phase, active, overshootConnected]);
 
   // ── Stage vision polling while playing ──
   useEffect(() => {
@@ -352,7 +555,10 @@ export default function BedtimeStoryView() {
     const audio = new Audio(url);
     audio.volume = 1.0;
     narrationAudioRef.current = audio;
-    audio.play().catch(() => {});
+    setIsNarrationPlaying(true);
+    audio.onended = () => setIsNarrationPlaying(false);
+    audio.onpause = () => setIsNarrationPlaying(false);
+    audio.play().catch(() => setIsNarrationPlaying(false));
   }
 
   // ── Character injection from WebSocket ──
@@ -572,6 +778,98 @@ export default function BedtimeStoryView() {
     }
   }
 
+  // ── Continuous speech recognition (Web Speech API) ──
+  useEffect(() => {
+    const SpeechRecognition = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
+    setSpeechSupported(!!SpeechRecognition);
+  }, []);
+
+  useEffect(() => {
+    const SpeechRecognition = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
+    if (!SpeechRecognition || phase !== 'playing' || !active) return;
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = language || 'en-US';
+    speechRecognitionRef.current = recognition;
+
+    recognition.onresult = (event: any) => {
+      let interimTranscript = '';
+      let finalTranscript = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        if (result.isFinal) {
+          finalTranscript += result[0].transcript;
+        } else {
+          interimTranscript += result[0].transcript;
+        }
+      }
+
+      if (interimTranscript) {
+        setLiveTranscript(interimTranscript);
+      }
+
+      if (finalTranscript.trim()) {
+        setLiveTranscript('');
+        // Auto-detect language from speech
+        const detLang = detectLanguageFromText(finalTranscript);
+        if (detLang && detLang !== language) {
+          setDetectedLanguage(detLang);
+          setLanguage(detLang);
+          fetch(`${API_BASE}/api/story/set-language`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ language: detLang }),
+          }).catch(() => {});
+        }
+        // Fire story beat with the transcript
+        if (!beatingRef.current && activeRef.current) {
+          fireBeat(finalTranscript.trim());
+        }
+      }
+    };
+
+    recognition.onerror = (event: any) => {
+      if (event.error !== 'no-speech' && event.error !== 'aborted') {
+        console.warn('[SPEECH] Recognition error:', event.error);
+      }
+    };
+
+    recognition.onend = () => {
+      // Auto-restart unless we're no longer in playing phase
+      if (activeRef.current && !isNarrationPlayingRef.current) {
+        try { recognition.start(); } catch { /* already started */ }
+      }
+      setSpeechActive(false);
+    };
+
+    recognition.onstart = () => setSpeechActive(true);
+
+    // Start recognition (pause if narration is currently playing)
+    if (!isNarrationPlaying) {
+      try { recognition.start(); } catch { /* ignore */ }
+    }
+
+    return () => {
+      speechRecognitionRef.current = null;
+      try { recognition.stop(); } catch { /* ignore */ }
+      setSpeechActive(false);
+      setLiveTranscript('');
+    };
+  }, [phase, active, language]);
+
+  // ── Pause/resume speech recognition during narration audio ──
+  useEffect(() => {
+    const recognition = speechRecognitionRef.current;
+    if (!recognition) return;
+    if (isNarrationPlaying) {
+      try { recognition.stop(); } catch { /* ignore */ }
+    } else if (activeRef.current && phase === 'playing') {
+      try { recognition.start(); } catch { /* already started */ }
+    }
+  }, [isNarrationPlaying]);
+
   // ── Export ──
   async function handleExport() {
     setPhase('export');
@@ -582,6 +880,7 @@ export default function BedtimeStoryView() {
     return () => {
       micStreamRef.current?.getTracks().forEach((t) => t.stop());
       recorderRef.current = null;
+      try { speechRecognitionRef.current?.stop(); } catch { /* ignore */ }
     };
   }, []);
 
@@ -642,7 +941,9 @@ export default function BedtimeStoryView() {
             <div className="flex items-center gap-2">
               {faceDetected && (
                 <span className="bg-emerald-900/60 backdrop-blur-sm border border-emerald-500/30 rounded-full px-3 py-1 text-emerald-300 text-xs font-mono animate-fade-in">
-                  Face detected
+                  {faceCaptureProgress > 0
+                    ? `Capturing face ${faceCaptureProgress}/${FACE_CAPTURE_TOTAL}...`
+                    : 'Face captured'}
                 </span>
               )}
               {dollDetected && (
@@ -864,6 +1165,18 @@ export default function BedtimeStoryView() {
                   {peopleCount} {peopleCount === 1 ? 'person' : 'people'}
                 </span>
               )}
+              {speechActive && (
+                <span className="flex items-center gap-1 bg-blue-900/40 backdrop-blur-sm rounded-full px-2.5 py-0.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+                  <span className="text-blue-300 text-xs font-mono">Listening</span>
+                </span>
+              )}
+              {overshootConnected && (
+                <span className="flex items-center gap-1 bg-purple-900/40 backdrop-blur-sm rounded-full px-2.5 py-0.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-purple-400 animate-pulse" />
+                  <span className="text-purple-300 text-xs font-mono">Vision</span>
+                </span>
+              )}
               {active && (
                 <span className="flex items-center gap-1 bg-emerald-900/40 backdrop-blur-sm rounded-full px-2.5 py-0.5">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
@@ -874,11 +1187,16 @@ export default function BedtimeStoryView() {
           </div>
         </div>
 
-        {/* Bottom: narration overlay */}
+        {/* Bottom: narration overlay + live transcript */}
         <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-midnight/90 via-midnight/60 to-transparent p-4 z-10">
           {narration && (
             <p className="font-story text-parchment text-base leading-relaxed italic max-w-3xl">
               &ldquo;{narration}&rdquo;
+            </p>
+          )}
+          {liveTranscript && (
+            <p className="font-body text-gold/60 text-sm mt-1 animate-pulse truncate max-w-2xl">
+              {liveTranscript}...
             </p>
           )}
         </div>
@@ -1029,4 +1347,22 @@ function blobToDataUrl(blob: Blob): Promise<string> {
     reader.onerror = reject;
     reader.readAsDataURL(blob);
   });
+}
+
+/** Basic language detection from keywords in transcribed text. */
+function detectLanguageFromText(text: string): string | null {
+  const t = text.toLowerCase();
+  const langPatterns: [RegExp, string][] = [
+    [/\b(hola|buenas|cuento|historia|por favor)\b/i, 'es'],
+    [/\b(bonjour|bonsoir|histoire|s'il vous plaît)\b/i, 'fr'],
+    [/\b(guten|abend|geschichte|bitte)\b/i, 'de'],
+    [/\b(ciao|buona|storia|per favore)\b/i, 'it'],
+    [/\b(olá|boa|história|por favor)\b/i, 'pt'],
+    [/\b(здравствуйте|спасибо|сказка|пожалуйста)\b/i, 'ru'],
+    [/\b(habari|hadithi|tafadhali)\b/i, 'sw'],
+  ];
+  for (const [re, code] of langPatterns) {
+    if (re.test(t)) return code;
+  }
+  return null;
 }
