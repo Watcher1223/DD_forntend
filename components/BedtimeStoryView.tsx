@@ -552,6 +552,34 @@ export default function BedtimeStoryView() {
     }
   }, [currentScene, videoClips, playingVideo]);
 
+  // ── Poll for video clips from backend (Veo generation is async, 30-120s) ──
+  const VIDEO_POLL_MS = 8000;
+  useEffect(() => {
+    if (phase !== 'playing' || !active || !veoGenerating) return;
+    const poll = setInterval(async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/story/scenes`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.scenes) {
+          let foundNew = false;
+          for (const scene of data.scenes) {
+            if (scene.videoClip?.videoUrl && !videoClips.has(scene.beatIndex)) {
+              setVideoClips((prev) => {
+                const next = new Map(prev);
+                next.set(scene.beatIndex, { videoUrl: scene.videoClip.videoUrl, durationSeconds: scene.videoClip.durationSeconds });
+                return next;
+              });
+              foundNew = true;
+            }
+          }
+          if (foundNew) setVeoGenerating(false);
+        }
+      } catch { /* silent */ }
+    }, VIDEO_POLL_MS);
+    return () => clearInterval(poll);
+  }, [phase, active, veoGenerating]);
+
   // ── Generate QR code for phone pairing when story is playing ──
   useEffect(() => {
     if (phase !== 'playing' || !active) return;
@@ -859,6 +887,10 @@ export default function BedtimeStoryView() {
       // Auto-enable V2V if backend says it's configured (but stay on static until frames arrive)
       if ((data as any).v2vEnabled) {
         setV2vEnabled(true);
+      }
+      // Track Veo status for video generation indicator
+      if ((data as any).veoEnabled) {
+        setVeoGenerating(true);
       }
 
       setActive(true);
