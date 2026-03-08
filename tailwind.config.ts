@@ -7,6 +7,9 @@ const config: Config = {
   ],
   theme: {
     extend: {
+      zIndex: {
+        '5': '5',
+      },
       fontFamily: {
         display: ['Playfair Display', 'Cinzel', 'serif'],
         story: ['Lora', 'Crimson Text', 'Georgia', 'serif'],

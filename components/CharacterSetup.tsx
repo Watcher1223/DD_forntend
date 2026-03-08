@@ -10,8 +10,7 @@ import type {
   PairResponse,
   ProfilesUpdatedMessage,
 } from '@/lib/api-types';
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4300';
+import { API_BASE } from '@/lib/config';
 
 type Phase = 'loading' | 'prompt' | 'camera' | 'capturing' | 'analyzing' | 'pairing' | 'results';
 

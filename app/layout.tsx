@@ -10,8 +10,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <body className="min-h-screen antialiased">
-        <div className="vignette" />
-        {children}
+        <div className="vignette" aria-hidden />
+        <div className="relative z-[100] min-h-screen">
+          {children}
+        </div>
       </body>
     </html>
   );

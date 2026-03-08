@@ -3,7 +3,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import type { SpeechTranscribeResponse } from '@/lib/api-types';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4300';
+import { API_BASE } from '@/lib/config';
 
 type MicState = 'idle' | 'recording' | 'transcribing';
 

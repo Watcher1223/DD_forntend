@@ -11,8 +11,9 @@ export interface HealthResponse {
   has_lyria: boolean;
   has_vision: boolean;
   has_speech: boolean;
+  has_semantic_memory?: boolean;
+  has_subject_customization?: boolean;
   has_livekit?: boolean;
-  has_subject_customization: boolean;
 }
 
 export interface ActionImage {
@@ -146,6 +147,10 @@ export interface StoryBeatResponse {
   story_energy?: number;
   event_number?: number;
   language?: string;
+  /** Optional pre-generated video clip from beat (e.g. Veo) */
+  videoClip?: { videoUrl: string; durationSeconds: number };
+  /** Scene index this beat corresponds to (for video clip mapping) */
+  beatIndex?: number;
 }
 
 /** POST /api/story/configure body */
@@ -162,6 +167,8 @@ export interface StoryConfigureResponse {
   childAge: number;
   learningGoals: string[];
   storyEnergy: number;
+  createdAt?: number;
+  updatedAt?: number;
 }
 
 export interface MusicUpdateBody {

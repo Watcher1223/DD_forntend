@@ -12,9 +12,7 @@ import type {
   StoryExportResponse,
   StageVisionTickMessage,
 } from '@/lib/api-types';
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4300';
-const WS_URL = API_BASE.replace(/^http/, 'ws');
+import { API_BASE, WS_URL } from '@/lib/config';
 const OVERSHOOT_WS_URL = process.env.NEXT_PUBLIC_OVERSHOOT_WS_URL || '';
 
 // ── Timing constants ──
@@ -107,6 +105,7 @@ export default function BedtimeStoryView() {
 
   // ── Refs ──
   const videoRef = useRef<HTMLVideoElement>(null);
+  const miniVideoRef = useRef<HTMLVideoElement>(null);
   const storyCanvasRef = useRef<HTMLCanvasElement>(null);
   const storyVideoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -518,12 +517,20 @@ export default function BedtimeStoryView() {
     }
   }
 
-  // Bind stream to video element
+  // Bind stream to video elements (main + bottom CAM)
   useEffect(() => {
-    if (cameraReady && videoRef.current && streamRef.current) {
-      videoRef.current.srcObject = streamRef.current;
-    }
+    const stream = streamRef.current;
+    if (!cameraReady || !stream) return;
+    if (videoRef.current) videoRef.current.srcObject = stream;
+    if (miniVideoRef.current) miniVideoRef.current.srcObject = stream;
   }, [cameraReady]);
+
+  // When the mini CAM mounts (e.g. after switching to playing phase), assign the stream
+  // so it shows the live feed even though the main video may be unmounted.
+  const setMiniVideoRef = useCallback((el: HTMLVideoElement | null) => {
+    (miniVideoRef as React.MutableRefObject<HTMLVideoElement | null>).current = el;
+    if (el && streamRef.current) el.srcObject = streamRef.current;
+  }, []);
 
   function stopCamera() {
     streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -713,15 +720,22 @@ export default function BedtimeStoryView() {
   }
 
   // ── Fire a story beat ──
+  const BEAT_TIMEOUT_MS = 55_000; // Backend can take 10–30s for Gemini + image; fail after ~55s
+
   async function fireBeat(action: string) {
     if (beatingRef.current) return;
     setIsBeating(true);
+    setError(null);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), BEAT_TIMEOUT_MS);
     try {
       const res = await fetch(`${API_BASE}/api/story/beat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action }),
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
       const data = (await res.json()) as StoryBeatResponse & { error?: string };
       if (!res.ok) {
         setError(data.error || 'Beat failed');
@@ -761,13 +775,12 @@ export default function BedtimeStoryView() {
       }
 
       // Handle pre-generated video clip from beat response
-      if (data.videoClip?.videoUrl) {
+      const clip = data.videoClip;
+      if (clip?.videoUrl) {
+        const idx = data.beatIndex ?? scenes.length;
         setVideoClips((prev) => {
           const next = new Map(prev);
-          next.set(data.beatIndex ?? scenes.length, {
-            videoUrl: data.videoClip.videoUrl,
-            durationSeconds: data.videoClip.durationSeconds,
-          });
+          next.set(idx, { videoUrl: clip.videoUrl, durationSeconds: clip.durationSeconds });
           return next;
         });
       }
@@ -788,8 +801,17 @@ export default function BedtimeStoryView() {
         setVideoMode(v2vEnabled && v2vFrame ? 'v2v' : 'static');
         return next;
       });
-    } catch {
-      setError('Story beat request failed');
+    } catch (err: unknown) {
+      clearTimeout(timeoutId);
+      const isAbort = err instanceof Error && err.name === 'AbortError';
+      const isNetwork = err instanceof TypeError && (err.message === 'Failed to fetch' || err.message?.includes('NetworkError'));
+      if (isAbort) {
+        setError('Scene is taking too long. The story server may be slow or unreachable.');
+      } else if (isNetwork) {
+        setError('Cannot reach the story server. Is the backend running? Using the hosted server? Check .env (NEXT_PUBLIC_API_URL).');
+      } else {
+        setError('Story beat request failed');
+      }
     } finally {
       setIsBeating(false);
     }
@@ -1244,9 +1266,12 @@ export default function BedtimeStoryView() {
         {/* Loading overlay */}
         {isBeating && (
           <div className="absolute inset-0 bg-midnight/30 flex items-center justify-center z-20">
-            <div className="bg-black/60 backdrop-blur-sm rounded-full px-5 py-2 flex items-center gap-2">
-              <div className="w-4 h-4 border-2 border-gold/40 border-t-gold rounded-full animate-spin" />
-              <span className="text-gold text-sm font-display tracking-wider">Creating...</span>
+            <div className="bg-black/60 backdrop-blur-sm rounded-2xl px-6 py-4 flex flex-col items-center gap-2">
+              <div className="flex items-center gap-2">
+                <div className="w-5 h-5 border-2 border-gold/40 border-t-gold rounded-full animate-spin" />
+                <span className="text-gold text-sm font-display tracking-wider">Creating scene…</span>
+              </div>
+              <p className="text-parchment-dim/60 text-xs font-body">This may take 10–30 seconds</p>
             </div>
           </div>
         )}
@@ -1454,12 +1479,12 @@ export default function BedtimeStoryView() {
         </div>
       </div>
 
-      {/* Mini camera preview — fixed bottom-right */}
+      {/* Mini camera preview — fixed bottom-right (live feed) */}
       {cameraReady && (
         <div className="fixed bottom-4 right-4 z-50">
-          <div className="relative w-32 h-24 rounded-xl overflow-hidden border border-gold/30 shadow-lg">
+          <div className="relative w-32 h-24 rounded-xl overflow-hidden border border-gold/30 shadow-lg bg-midnight">
             <video
-              ref={videoRef}
+              ref={setMiniVideoRef}
               autoPlay
               playsInline
               muted
