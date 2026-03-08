@@ -27,6 +27,7 @@ const OVERSHOOT_OBJECT_MS = 5000;
 const OVERSHOOT_SETUP_OBJECT_MS = 3000;
 const FACE_CAPTURE_INTERVAL_MS = 1500;
 const FACE_CAPTURE_TOTAL = 4;
+const DOLL_DETECT_POLL_MS = 10000;
 
 type Phase = 'setup' | 'playing' | 'export';
 
@@ -109,6 +110,7 @@ export default function BedtimeStoryView() {
   const [pairModalOpen, setPairModalOpen] = useState(false);
   const [pairData, setPairData] = useState<PairResponse | null>(null);
   const [pairQrUrl, setPairQrUrl] = useState<string | null>(null);
+  const [pairCode, setPairCode] = useState<string | null>(null);
 
   // ── Refs ──
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -139,6 +141,7 @@ export default function BedtimeStoryView() {
   const speechRecognitionRef = useRef<any>(null);
   const isNarrationPlayingRef = useRef(false);
   const v2vFrameIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const dollDetectIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Keep refs in sync
   useEffect(() => { activeRef.current = active; }, [active]);
@@ -460,6 +463,59 @@ export default function BedtimeStoryView() {
     }
   }, [currentScene, videoClips, playingVideo]);
 
+  // ── Generate QR code for phone pairing when story is playing ──
+  useEffect(() => {
+    if (phase !== 'playing' || !active) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/camera/pair`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled) return;
+        if (data.phoneUrl) {
+          setPairCode(data.code || null);
+          const qrUrl = await QRCode.toDataURL(data.phoneUrl, { width: 192, margin: 1 });
+          if (!cancelled) setPairQrUrl(qrUrl);
+        }
+      } catch { /* QR pairing optional */ }
+    })();
+    return () => { cancelled = true; };
+  }, [phase, active]);
+
+  // ── Doll detection during playing (Gemini fallback, when Overshoot not connected) ──
+  useEffect(() => {
+    if (phase !== 'playing' || !active || !cameraReady || overshootConnected || dollDetected) return;
+    dollDetectIntervalRef.current = setInterval(() => {
+      const frame = captureFrame();
+      if (!frame) return;
+      fetch(`${API_BASE}/api/story/detect-object`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ frame }),
+      })
+        .then((r) => r.json())
+        .then((data) => {
+          if (data.protagonist_description) {
+            setDollDetected(data.protagonist_description);
+            fetch(`${API_BASE}/api/story/set-protagonist`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ protagonist_description: data.protagonist_description }),
+            }).catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }, DOLL_DETECT_POLL_MS);
+    return () => {
+      if (dollDetectIntervalRef.current) clearInterval(dollDetectIntervalRef.current);
+    };
+  }, [phase, active, cameraReady, overshootConnected, dollDetected]);
+
   // ── Emotion polling fallback (Gemini, when Overshoot not connected) ──
   useEffect(() => {
     if (phase === 'playing' && active && !overshootConnected) {
@@ -535,13 +591,13 @@ export default function BedtimeStoryView() {
     }
   }
 
-  // Bind stream to video elements (main + bottom CAM)
+  // Bind stream to video elements (main + bottom CAM) — rebind on phase change
   useEffect(() => {
     const stream = streamRef.current;
     if (!cameraReady || !stream) return;
     if (videoRef.current) videoRef.current.srcObject = stream;
     if (miniVideoRef.current) miniVideoRef.current.srcObject = stream;
-  }, [cameraReady]);
+  }, [cameraReady, phase]);
 
   // When the mini CAM mounts (e.g. after switching to playing phase), assign the stream
   // so it shows the live feed even though the main video may be unmounted.
@@ -557,7 +613,7 @@ export default function BedtimeStoryView() {
 
   function captureFrame(): string | null {
     // In setup phase the main video is mounted; in playing phase only the mini CAM has the stream.
-    const video = videoRef.current?.videoWidth ? videoRef.current : miniVideoRef.current;
+    const video = (phase === 'playing' && miniVideoRef.current?.videoWidth) ? miniVideoRef.current : videoRef.current;
     if (!video || !canvasRef.current || video.videoWidth === 0) return null;
     const canvas = canvasRef.current;
     canvas.width = video.videoWidth;
@@ -705,10 +761,9 @@ export default function BedtimeStoryView() {
       if ((data as any).livekit) {
         setLivekitRoom((data as any).livekit);
       }
-      // Auto-enable V2V if backend says it's configured
+      // Auto-enable V2V if backend says it's configured (but stay on static until frames arrive)
       if ((data as any).v2vEnabled) {
         setV2vEnabled(true);
-        setVideoMode('v2v');
       }
 
       setActive(true);
@@ -735,6 +790,8 @@ export default function BedtimeStoryView() {
     setPlayingVideo(false);
     setVideoMode('static');
     setLivekitRoom(null);
+    setPairQrUrl(null);
+    setPairCode(null);
   }
 
   // ── Fire a story beat ──
@@ -819,9 +876,9 @@ export default function BedtimeStoryView() {
       setScenes((prev) => {
         const next = [...prev, scene];
         setCurrentScene(next.length - 1);
-        // Reset video mode for new scene
+        // Reset to static for new scene (V2V/Veo will overlay when they have content)
         setPlayingVideo(false);
-        setVideoMode(v2vEnabled && v2vFrame ? 'v2v' : 'static');
+        setVideoMode('static');
         return next;
       });
     } catch (err: unknown) {
@@ -1289,38 +1346,12 @@ export default function BedtimeStoryView() {
 
       {/* Scene display — full width, 3-layer video player */}
       <div className="relative rounded-2xl overflow-hidden border-2 border-gold/30 shadow-[0_0_60px_rgba(212,168,83,0.15)] aspect-video bg-midnight-light min-h-[300px]">
-        {/* Layer 1: Veo video clips (z-10 when active) */}
-        <video
-          ref={storyVideoRef}
-          className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-700 ${
-            videoMode === 'veo' ? 'opacity-100 z-10' : 'opacity-0 z-0'
-          }`}
-          playsInline
-          onEnded={() => {
-            setPlayingVideo(false);
-            setVideoMode(v2vEnabled && v2vFrame ? 'v2v' : 'static');
-          }}
-        />
-
-        {/* Layer 2: V2V canvas frames (z-5 when active) */}
-        {v2vFrame && (
-          <img
-            src={v2vFrame}
-            alt="V2V frame"
-            className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-300 ${
-              videoMode === 'v2v' ? 'opacity-100 z-5' : 'opacity-0 z-0'
-            }`}
-          />
-        )}
-
-        {/* Layer 3: Static scene image (fallback) */}
+        {/* Base layer: Static scene image (always visible as fallback) */}
         {sceneImage ? (
           <img
             src={sceneImage}
             alt="Story scene"
-            className={`w-full h-full object-cover transition-opacity duration-700 ${
-              videoMode === 'static' ? 'opacity-100' : 'opacity-0'
-            }`}
+            className="w-full h-full object-cover transition-opacity duration-700"
           />
         ) : (
           <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-b from-midnight-light via-midnight to-midnight-light">
@@ -1332,6 +1363,32 @@ export default function BedtimeStoryView() {
             </div>
           </div>
         )}
+
+        {/* Layer 2: V2V frames (overlays on top of static image when V2V has content) */}
+        {v2vFrame && v2vEnabled && (
+          <img
+            src={v2vFrame}
+            alt="V2V frame"
+            className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-300 ${
+              videoMode === 'v2v' ? 'opacity-100' : 'opacity-0'
+            }`}
+            style={{ zIndex: 5 }}
+          />
+        )}
+
+        {/* Layer 3: Veo video clips (top layer when playing) */}
+        <video
+          ref={storyVideoRef}
+          className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-700 ${
+            videoMode === 'veo' && playingVideo ? 'opacity-100' : 'opacity-0 pointer-events-none'
+          }`}
+          style={{ zIndex: 10 }}
+          playsInline
+          onEnded={() => {
+            setPlayingVideo(false);
+            setVideoMode(v2vEnabled && v2vFrame ? 'v2v' : 'static');
+          }}
+        />
 
         {/* Loading overlay */}
         {isBeating && (
@@ -1552,21 +1609,29 @@ export default function BedtimeStoryView() {
       {/* Mini camera preview — fixed bottom-right (live feed) + Invite QR */}
       {cameraReady && (
         <div className="fixed bottom-4 right-4 z-50 flex flex-col items-end gap-2">
-          <div className="flex items-center gap-2">
+          {/* QR code for phone pairing (auto-generated or via button) */}
+          {pairQrUrl && (
+            <div className="bg-white rounded-lg p-1.5 shadow-lg border border-gold/30">
+              <img src={pairQrUrl} alt="Scan to join" className="w-24 h-24" />
+              <p className="text-[7px] text-center text-gray-500 font-mono mt-0.5">
+                {pairCode ? `Code: ${pairCode}` : 'Scan to join'}
+              </p>
+            </div>
+          )}
+          {!pairQrUrl && (
             <button
               type="button"
               onClick={async () => {
                 setPairModalOpen(true);
                 if (audioContextRef.current?.state === 'suspended') audioContextRef.current.resume();
                 try {
-                  if (!pairData || !pairQrUrl) {
-                    const res = await fetch(`${API_BASE}/api/camera/pair`, { method: 'POST' });
-                    if (!res.ok) throw new Error('Pair failed');
-                    const data = (await res.json()) as PairResponse;
-                    setPairData(data);
-                    const qr = await QRCode.toDataURL(data.phoneUrl, { width: 256, margin: 2 });
-                    setPairQrUrl(qr);
-                  }
+                  const res = await fetch(`${API_BASE}/api/camera/pair`, { method: 'POST' });
+                  if (!res.ok) throw new Error('Pair failed');
+                  const data = (await res.json()) as PairResponse;
+                  setPairData(data);
+                  setPairCode(data.pairCode || null);
+                  const qr = await QRCode.toDataURL(data.phoneUrl, { width: 256, margin: 2 });
+                  setPairQrUrl(qr);
                 } catch {
                   setError('Could not load invite link. Is the backend running?');
                 }
@@ -1576,7 +1641,7 @@ export default function BedtimeStoryView() {
             >
               QR Invite
             </button>
-          </div>
+          )}
           <div className="relative w-32 h-24 rounded-xl overflow-hidden border border-gold/30 shadow-lg bg-midnight">
             <video
               ref={setMiniVideoRef}
@@ -1589,6 +1654,11 @@ export default function BedtimeStoryView() {
               <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
               <span className="text-[8px] text-parchment/60 font-mono">CAM</span>
             </div>
+            {dollDetected && (
+              <div className="absolute bottom-1 left-1 right-1 bg-black/60 rounded px-1 py-0.5">
+                <span className="text-[7px] text-gold font-mono truncate block">{dollDetected}</span>
+              </div>
+            )}
           </div>
         </div>
       )}
