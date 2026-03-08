@@ -14,7 +14,7 @@ import type {
   StageVisionTickMessage,
   PairResponse,
 } from '@/lib/api-types';
-import { API_BASE, WS_URL } from '@/lib/config';
+import { API_BASE, WS_URL, PAIR_PHONE_BASE } from '@/lib/config';
 const OVERSHOOT_WS_URL = process.env.NEXT_PUBLIC_OVERSHOOT_WS_URL || '';
 
 // ── Timing constants ──
@@ -64,6 +64,8 @@ export default function BedtimeStoryView() {
   const [detectedLanguage, setDetectedLanguage] = useState<string | null>(null);
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Campaign ID from configure — links face references to this story so AI uses your image */
+  const [campaignId, setCampaignId] = useState<number | null>(null);
 
   // ── Playing state ──
   const [scenes, setScenes] = useState<StoryScene[]>([]);
@@ -71,6 +73,8 @@ export default function BedtimeStoryView() {
   const [narration, setNarration] = useState('');
   const [sceneImage, setSceneImage] = useState<string | null>(null);
   const [imageSource, setImageSource] = useState<'nanobanana' | 'imagen' | 'imagen_custom' | null>(null);
+  /** From last beat response: true = your face was used; false = generic character; null = not set */
+  const [imageUsedYourFaceLastBeat, setImageUsedYourFaceLastBeat] = useState<boolean | null>(null);
   const [musicMood, setMusicMood] = useState('calm');
   const [currentEmotion, setCurrentEmotion] = useState('neutral');
   const [peopleCount, setPeopleCount] = useState(0);
@@ -134,6 +138,7 @@ export default function BedtimeStoryView() {
   const beatingRef = useRef(false);
   const activeRef = useRef(false);
   const faceCaptureTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const campaignIdRef = useRef<number | null>(null);
   const overshootWsRef = useRef<WebSocket | null>(null);
   const overshootEmotionIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const overshootObjectIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -147,6 +152,7 @@ export default function BedtimeStoryView() {
   useEffect(() => { activeRef.current = active; }, [active]);
   useEffect(() => { beatingRef.current = isBeating; }, [isBeating]);
   useEffect(() => { isNarrationPlayingRef.current = isNarrationPlaying; }, [isNarrationPlaying]);
+  useEffect(() => { campaignIdRef.current = campaignId; }, [campaignId]);
 
   // ── Health check ──
   useEffect(() => {
@@ -214,6 +220,24 @@ export default function BedtimeStoryView() {
     return () => stopCamera();
   }, []);
 
+  // ── Configure early in setup so we have campaignId for face reference storage ──
+  // Backend ties stored face frames to this campaign; story/start must use same campaign so images use your face.
+  useEffect(() => {
+    if (phase !== 'setup' || !cameraReady || campaignId != null) return;
+    fetch(`${API_BASE}/api/story/configure`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ childName: 'Hero', childAge: 5 }),
+    })
+      .then((r) => r.json())
+      .then((data: { campaignId?: number }) => {
+        if (typeof data.campaignId === 'number') {
+          setCampaignId(data.campaignId);
+        }
+      })
+      .catch(() => {});
+  }, [phase, cameraReady, campaignId]);
+
   // ── Auto-detect face once camera is ready + multi-frame capture ──
   useEffect(() => {
     if (cameraReady && phase === 'setup' && !faceDetected) {
@@ -226,7 +250,7 @@ export default function BedtimeStoryView() {
         fetch(`${API_BASE}/api/camera/analyze`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ frame }),
+          body: JSON.stringify({ frame, campaignId: campaignIdRef.current ?? undefined }),
         })
           .then((r) => r.json())
           .then((data) => {
@@ -249,7 +273,7 @@ export default function BedtimeStoryView() {
                   fetch(`${API_BASE}/api/camera/analyze`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ frame: nextFrame }),
+                    body: JSON.stringify({ frame: nextFrame, campaignId: campaignIdRef.current ?? undefined }),
                   }).catch(() => {});
                 }
                 if (capturedCount < FACE_CAPTURE_TOTAL) {
@@ -443,6 +467,26 @@ export default function BedtimeStoryView() {
     };
   }, [phase, active, v2vEnabled, cameraReady]);
 
+  // ── Live face reference refresh: when "You" is ON, send a frame to camera/analyze every 5s ──
+  // so the backend keeps an up-to-date reference for rendering the user into the story (see docs/WHY_RANDOM_PEOPLE.md).
+  const FACE_REFRESH_MS = 5000;
+  useEffect(() => {
+    if (phase !== 'playing' || !active || !v2vEnabled || !cameraReady || campaignIdRef.current == null) return;
+    const sendFaceRef = () => {
+      const frame = captureFrame();
+      if (frame) {
+        fetch(`${API_BASE}/api/camera/analyze`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ frame, campaignId: campaignIdRef.current }),
+        }).catch(() => {});
+      }
+    };
+    sendFaceRef(); // first frame immediately (we also send one on toggle; this covers page refresh)
+    const id = setInterval(sendFaceRef, FACE_REFRESH_MS);
+    return () => clearInterval(id);
+  }, [phase, active, v2vEnabled, cameraReady]);
+
   // ── Auto-play Veo clips when ready for current scene ──
   useEffect(() => {
     const clip = videoClips.get(currentScene);
@@ -478,7 +522,7 @@ export default function BedtimeStoryView() {
         const data = await res.json();
         if (cancelled) return;
         if (data.phoneUrl) {
-          setPairCode(data.code || null);
+          setPairCode((data as PairResponse).pairCode ?? (data as PairResponse).code ?? null);
           const qrUrl = await QRCode.toDataURL(data.phoneUrl, { width: 192, margin: 1 });
           if (!cancelled) setPairQrUrl(qrUrl);
         }
@@ -734,17 +778,22 @@ export default function BedtimeStoryView() {
         audioContextRef.current.resume();
       }
 
-      // Configure story
-      await fetch(`${API_BASE}/api/story/configure`, {
+      // Configure story (ensure we have a campaign; may already have one from setup)
+      const configureRes = await fetch(`${API_BASE}/api/story/configure`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ childName: 'Hero', childAge: 5 }),
-      }).catch(() => {});
+      });
+      const configureData = await configureRes.json().catch(() => ({}));
+      if (typeof (configureData as any).campaignId === 'number') {
+        setCampaignId((configureData as any).campaignId);
+      }
 
-      // Start music session
-      const body: Record<string, string> = {};
+      // Start music session — pass campaignId so backend uses this campaign's face references for images
+      const body: Record<string, string | number> = {};
       if (themeInput.trim()) body.themeDescription = themeInput.trim();
       if (language !== 'en') body.language = language;
+      if (campaignId != null) body.campaignId = campaignId;
 
       const res = await fetch(`${API_BASE}/api/story/start`, {
         method: 'POST',
@@ -827,6 +876,9 @@ export default function BedtimeStoryView() {
         setSceneImage(normalizedImageUrl);
         setImageSource((data as any).image?.source ?? null);
       }
+      setImageUsedYourFaceLastBeat(
+        typeof (data as any).imageUsedYourFace === 'boolean' ? (data as any).imageUsedYourFace : null
+      );
       if (data.mood) setMusicMood(data.mood);
 
       // Auto-detect language change from beat response
@@ -1103,6 +1155,11 @@ export default function BedtimeStoryView() {
             {error}
           </div>
         )}
+        {health && health.has_subject_customization === false && (
+          <div className="rounded-lg bg-amber-900/20 border border-amber-600/30 px-4 py-2 text-center text-amber-200 text-sm">
+            Face-in-story is not configured on the server. Scene images will use generic characters until the backend enables Vertex Imagen 3 subject customization.
+          </div>
+        )}
 
         {/* Live camera preview — always-on */}
         <div className="relative rounded-2xl overflow-hidden border-2 border-gold/30 shadow-[0_0_40px_rgba(201,169,110,0.12)] aspect-video bg-midnight-light">
@@ -1232,7 +1289,10 @@ export default function BedtimeStoryView() {
                 if (!res.ok) throw new Error('Pair failed');
                 const data = (await res.json()) as PairResponse;
                 setPairData(data);
-                const qr = await QRCode.toDataURL(data.phoneUrl, { width: 256, margin: 2 });
+                setPairCode(data.pairCode ?? data.code);
+                const u = new URL(data.phoneUrl, 'http://_');
+                const urlForQr = `${PAIR_PHONE_BASE}${u.pathname}${u.search}`;
+                const qr = await QRCode.toDataURL(urlForQr, { width: 256, margin: 2 });
                 setPairQrUrl(qr);
               } catch {
                 setError('Could not load invite link. Is the backend running?');
@@ -1337,6 +1397,12 @@ export default function BedtimeStoryView() {
         </div>
       )}
 
+      {health && health.has_subject_customization === false && (
+        <div className="rounded-lg bg-amber-900/20 border border-amber-600/30 px-4 py-2 text-center text-amber-200 text-sm">
+          Face-in-story is not configured on the server. Turn on You and show your face; images will still be generic until the backend enables Vertex Imagen 3.
+        </div>
+      )}
+
       {/* Character injection flash */}
       {injectionMessage && (
         <div className="rounded-lg bg-gold/10 border border-gold/30 px-4 py-2 text-center text-gold text-sm animate-fade-in">
@@ -1415,6 +1481,16 @@ export default function BedtimeStoryView() {
               {imageSource && (
                 <span className="bg-black/50 backdrop-blur-sm px-2 py-0.5 rounded text-[10px] font-mono text-gold/90 uppercase">
                   {imageSource === 'imagen_custom' ? 'Personalized' : 'AI'}
+                </span>
+              )}
+              {imageUsedYourFaceLastBeat === true && (
+                <span className="bg-emerald-900/50 backdrop-blur-sm px-2 py-0.5 rounded text-[10px] font-mono text-emerald-300" title="Your face was used in this scene">
+                  Your face
+                </span>
+              )}
+              {imageUsedYourFaceLastBeat === false && (
+                <span className="bg-amber-900/50 backdrop-blur-sm px-2 py-0.5 rounded text-[10px] font-mono text-amber-300" title="Turn on You and show your face before the first beat; ensure server has face-in-story (Vertex Imagen 3) configured">
+                  Generic character
                 </span>
               )}
               {videoMode !== 'static' && (
@@ -1564,6 +1640,15 @@ export default function BedtimeStoryView() {
               setV2vEnabled(!v2vEnabled);
               if (!v2vEnabled) {
                 setVideoMode('v2v');
+                // Send a reference frame so the next beat can use your face (backend needs frame before first beat when You is ON)
+                const frame = captureFrame();
+                if (frame && campaignIdRef.current != null) {
+                  fetch(`${API_BASE}/api/camera/analyze`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ frame, campaignId: campaignIdRef.current }),
+                  }).catch(() => {});
+                }
               } else {
                 setVideoMode('static');
                 setV2vFrame(null);
@@ -1625,13 +1710,17 @@ export default function BedtimeStoryView() {
                 setPairModalOpen(true);
                 if (audioContextRef.current?.state === 'suspended') audioContextRef.current.resume();
                 try {
-                  const res = await fetch(`${API_BASE}/api/camera/pair`, { method: 'POST' });
-                  if (!res.ok) throw new Error('Pair failed');
-                  const data = (await res.json()) as PairResponse;
-                  setPairData(data);
-                  setPairCode(data.pairCode || null);
-                  const qr = await QRCode.toDataURL(data.phoneUrl, { width: 256, margin: 2 });
-                  setPairQrUrl(qr);
+                  if (!pairData || !pairQrUrl) {
+                    const res = await fetch(`${API_BASE}/api/camera/pair`, { method: 'POST' });
+                    if (!res.ok) throw new Error('Pair failed');
+                    const data = (await res.json()) as PairResponse;
+                    setPairData(data);
+                    setPairCode(data.pairCode ?? data.code);
+                    const u = new URL(data.phoneUrl, 'http://_');
+                    const urlForQr = `${PAIR_PHONE_BASE}${u.pathname}${u.search}`;
+                    const qr = await QRCode.toDataURL(urlForQr, { width: 256, margin: 2 });
+                    setPairQrUrl(qr);
+                  }
                 } catch {
                   setError('Could not load invite link. Is the backend running?');
                 }

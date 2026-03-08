@@ -100,6 +100,8 @@ export interface SpeechTranscribeResponse {
 
 export interface PairResponse {
   code: string;
+  /** Optional; some backends send pairCode instead of or in addition to code */
+  pairCode?: string;
   phoneUrl: string;
   expiresAt: number;
 }
@@ -151,6 +153,8 @@ export interface StoryBeatResponse {
   videoClip?: { videoUrl: string; durationSeconds: number };
   /** Scene index this beat corresponds to (for video clip mapping) */
   beatIndex?: number;
+  /** true = this scene used your face (Imagen 3 subject customization); false = generic character */
+  imageUsedYourFace?: boolean;
 }
 
 /** POST /api/story/configure body */
