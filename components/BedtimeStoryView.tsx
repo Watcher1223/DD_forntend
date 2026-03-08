@@ -37,7 +37,11 @@ interface StoryScene {
   audioUrl: string | null;
   action: string;
   timestamp: number;
+  motionCue?: string;
 }
+
+/** Number of Ken Burns animation variants in globals.css */
+const KENBURNS_COUNT = 8;
 
 /**
  * Fully real-time bedtime story experience.
@@ -106,6 +110,9 @@ export default function BedtimeStoryView() {
   const [videoClips, setVideoClips] = useState<Map<number, { videoUrl: string; durationSeconds: number }>>(new Map());
   const [playingVideo, setPlayingVideo] = useState(false);
   const [videoMode, setVideoMode] = useState<'static' | 'v2v' | 'veo'>('static');
+  const [veoGenerating, setVeoGenerating] = useState(false);
+  const [prevSceneImage, setPrevSceneImage] = useState<string | null>(null);
+  const [sceneTransitionKey, setSceneTransitionKey] = useState(0);
 
   // ── LiveKit state ──
   const [livekitRoom, setLivekitRoom] = useState<{ roomName: string; url: string } | null>(null);
@@ -224,7 +231,8 @@ export default function BedtimeStoryView() {
           setV2vFrame(`data:image/jpeg;base64,${msg.frame}`);
           if (v2vEnabled) setVideoMode('v2v');
         } else if (msg.type === 'story_video_clip' && msg.videoUrl) {
-          // Veo video clip ready
+          // Veo video clip ready — stop generating indicator
+          setVeoGenerating(false);
           setVideoClips((prev) => {
             const next = new Map(prev);
             next.set(msg.beatIndex, { videoUrl: msg.videoUrl, durationSeconds: msg.durationSeconds });
@@ -529,14 +537,16 @@ export default function BedtimeStoryView() {
       const el = storyVideoRef.current;
       el.crossOrigin = 'anonymous';
       el.src = clip.videoUrl;
+      el.loop = true;
       el.load();
       el.play()
         .then(() => {
           setPlayingVideo(true);
           setVideoMode('veo');
+          setVeoGenerating(false);
         })
         .catch(() => {
-          // Fallback to static image if video fails (e.g. CORS)
+          // Fallback to Ken Burns static image if video fails (e.g. CORS)
           setVideoMode('static');
         });
     }
@@ -895,7 +905,10 @@ export default function BedtimeStoryView() {
       ? (typeof rawImageUrl === 'string' && rawImageUrl.startsWith('data:') ? rawImageUrl : String(rawImageUrl))
       : null;
     if (normalizedImageUrl) {
+      // Store previous image for crossfade
+      setPrevSceneImage(sceneImage);
       setSceneImage(normalizedImageUrl);
+      setSceneTransitionKey((k) => k + 1);
       setImageSource((data as any).image?.source ?? null);
     }
     setImageUsedYourFaceLastBeat(
@@ -931,12 +944,15 @@ export default function BedtimeStoryView() {
         return next;
       });
     }
+    // Track Veo generating status
+    setVeoGenerating(!clip?.videoUrl && (data as any).veoEnabled !== false);
     const scene: StoryScene = {
       narration: data.narration || '',
       imageUrl: normalizedImageUrl ?? null,
       audioUrl: data.narrationAudioUrl ?? null,
       action,
       timestamp: Date.now(),
+      motionCue: (data as any).scene_prompt_motion || undefined,
     };
     setScenes((prev) => {
       const next = [...prev, scene];
@@ -1497,14 +1513,27 @@ export default function BedtimeStoryView() {
         </div>
       )}
 
-      {/* Scene display — full width, 3-layer video player */}
-      <div className="relative rounded-2xl overflow-hidden border-2 border-gold/30 shadow-[0_0_60px_rgba(212,168,83,0.15)] aspect-video bg-midnight-light min-h-[300px]">
-        {/* Base layer: Static scene image (always visible as fallback) */}
+      {/* Scene display — full width, cinematic 3-layer video player */}
+      <div className="relative rounded-2xl overflow-hidden border-2 border-gold/30 shadow-[0_0_60px_rgba(212,168,83,0.15)] aspect-video bg-midnight-light min-h-[300px] scene-particles">
+        {/* Crossfade: previous scene image fading out */}
+        {prevSceneImage && (
+          <img
+            key={`prev-${sceneTransitionKey - 1}`}
+            src={prevSceneImage}
+            alt=""
+            className={`absolute inset-0 w-full h-full object-cover kenburns-${((currentScene - 1 + KENBURNS_COUNT) % KENBURNS_COUNT)}`}
+            style={{ zIndex: 1, opacity: 0, animation: 'scene-fade-in 1.2s ease-out reverse forwards' }}
+          />
+        )}
+
+        {/* Base layer: Scene image with Ken Burns cinematic animation */}
         {sceneImage ? (
           <img
+            key={`scene-${sceneTransitionKey}`}
             src={sceneImage}
             alt="Story scene"
-            className="w-full h-full object-cover transition-opacity duration-700"
+            className={`w-full h-full object-cover scene-fade-in kenburns-${currentScene % KENBURNS_COUNT}`}
+            style={{ zIndex: 2 }}
           />
         ) : (
           <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-b from-midnight-light via-midnight to-midnight-light">
@@ -1537,9 +1566,13 @@ export default function BedtimeStoryView() {
           }`}
           style={{ zIndex: 10 }}
           playsInline
+          loop
           onEnded={() => {
-            setPlayingVideo(false);
-            setVideoMode(v2vEnabled && v2vFrame ? 'v2v' : 'static');
+            // Loop keeps playing; if loop attr fails, restart
+            if (storyVideoRef.current) {
+              storyVideoRef.current.currentTime = 0;
+              storyVideoRef.current.play().catch(() => {});
+            }
           }}
         />
 
@@ -1561,6 +1594,14 @@ export default function BedtimeStoryView() {
               </div>
             </div>
           )
+        )}
+
+        {/* Veo generating indicator — shows when Veo is creating video in background */}
+        {veoGenerating && !playingVideo && sceneImage && !isBeating && (
+          <div className="absolute top-3 right-3 z-20 flex items-center gap-1.5 bg-blue-900/60 backdrop-blur-sm rounded-full px-2.5 py-1 border border-blue-400/30 veo-generating">
+            <div className="w-2 h-2 border border-blue-300 border-t-transparent rounded-full animate-spin" />
+            <span className="text-blue-200 text-[9px] font-mono">Video rendering…</span>
+          </div>
         )}
 
         {/* Top bar: scene number + emotion + people count + video mode */}
@@ -1587,13 +1628,19 @@ export default function BedtimeStoryView() {
                   Generic character
                 </span>
               )}
-              {videoMode !== 'static' && (
-                <span className={`backdrop-blur-sm px-2 py-0.5 rounded text-[10px] font-mono uppercase ${
-                  videoMode === 'veo' ? 'bg-blue-900/50 text-blue-300' : 'bg-purple-900/50 text-purple-300'
-                }`}>
-                  {videoMode === 'veo' ? 'VIDEO' : 'V2V'}
+              {videoMode === 'veo' && playingVideo ? (
+                <span className="backdrop-blur-sm px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-blue-900/50 text-blue-300">
+                  VIDEO
                 </span>
-              )}
+              ) : videoMode === 'v2v' ? (
+                <span className="backdrop-blur-sm px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-purple-900/50 text-purple-300">
+                  V2V
+                </span>
+              ) : sceneImage ? (
+                <span className="backdrop-blur-sm px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-amber-900/40 text-amber-200/80">
+                  CINEMATIC
+                </span>
+              ) : null}
             </div>
 
             <div className="flex items-center gap-2">
@@ -1658,9 +1705,13 @@ export default function BedtimeStoryView() {
             <button
               onClick={() => {
                 const prev = Math.max(0, currentScene - 1);
+                setPrevSceneImage(sceneImage);
                 setCurrentScene(prev);
                 setSceneImage(scenes[prev].imageUrl);
                 setNarration(scenes[prev].narration);
+                setSceneTransitionKey((k) => k + 1);
+                setPlayingVideo(false);
+                setVideoMode('static');
               }}
               className="absolute left-2 top-1/2 -translate-y-1/2 z-20 bg-black/40 hover:bg-black/60 rounded-full w-10 h-10 flex items-center justify-center text-parchment/60 hover:text-parchment transition-all"
             >
@@ -1669,9 +1720,13 @@ export default function BedtimeStoryView() {
             <button
               onClick={() => {
                 const next = Math.min(scenes.length - 1, currentScene + 1);
+                setPrevSceneImage(sceneImage);
                 setCurrentScene(next);
                 setSceneImage(scenes[next].imageUrl);
                 setNarration(scenes[next].narration);
+                setSceneTransitionKey((k) => k + 1);
+                setPlayingVideo(false);
+                setVideoMode('static');
               }}
               className="absolute right-2 top-1/2 -translate-y-1/2 z-20 bg-black/40 hover:bg-black/60 rounded-full w-10 h-10 flex items-center justify-center text-parchment/60 hover:text-parchment transition-all"
             >
