@@ -95,8 +95,20 @@ export default function BedtimeStoryView() {
   // ── Overshoot state ──
   const [overshootConnected, setOvershootConnected] = useState(false);
 
+  // ── V2V / Video state ──
+  const [v2vEnabled, setV2vEnabled] = useState(false);
+  const [v2vFrame, setV2vFrame] = useState<string | null>(null);
+  const [videoClips, setVideoClips] = useState<Map<number, { videoUrl: string; durationSeconds: number }>>(new Map());
+  const [playingVideo, setPlayingVideo] = useState(false);
+  const [videoMode, setVideoMode] = useState<'static' | 'v2v' | 'veo'>('static');
+
+  // ── LiveKit state ──
+  const [livekitRoom, setLivekitRoom] = useState<{ roomName: string; url: string } | null>(null);
+
   // ── Refs ──
   const videoRef = useRef<HTMLVideoElement>(null);
+  const storyCanvasRef = useRef<HTMLCanvasElement>(null);
+  const storyVideoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -120,6 +132,7 @@ export default function BedtimeStoryView() {
   const overshootSetupObjectIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const speechRecognitionRef = useRef<any>(null);
   const isNarrationPlayingRef = useRef(false);
+  const v2vFrameIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Keep refs in sync
   useEffect(() => { activeRef.current = active; }, [active]);
@@ -140,6 +153,7 @@ export default function BedtimeStoryView() {
 
     ws.onopen = () => {
       ws.send(JSON.stringify({ type: 'subscribe', channel: 'story_audio' }));
+      ws.send(JSON.stringify({ type: 'subscribe', channel: 'story_video' }));
       subscribedRef.current = true;
     };
 
@@ -155,6 +169,20 @@ export default function BedtimeStoryView() {
         } else if (msg.type === 'stage_vision_tick') {
           const tick = msg as StageVisionTickMessage;
           setPeopleCount(tick.people_count);
+        } else if (msg.type === 'story_video_frame' && msg.frame) {
+          // V2V transformed frame
+          setV2vFrame(`data:image/jpeg;base64,${msg.frame}`);
+          if (v2vEnabled) setVideoMode('v2v');
+        } else if (msg.type === 'story_video_clip' && msg.videoUrl) {
+          // Veo video clip ready
+          setVideoClips((prev) => {
+            const next = new Map(prev);
+            next.set(msg.beatIndex, { videoUrl: msg.videoUrl, durationSeconds: msg.durationSeconds });
+            return next;
+          });
+        } else if (msg.type === 'livekit_v2v_room' && msg.roomName) {
+          // LiveKit room ready for V2V pipeline
+          setLivekitRoom({ roomName: msg.roomName, url: '' });
         }
       } catch { /* ignore */ }
     };
@@ -383,6 +411,37 @@ export default function BedtimeStoryView() {
       ws.close();
     };
   }, [phase, cameraReady, dollDetected]);
+
+  // ── V2V frame sending loop (send camera frames to backend for stylization) ──
+  useEffect(() => {
+    if (phase !== 'playing' || !active || !v2vEnabled || !cameraReady) return;
+    v2vFrameIntervalRef.current = setInterval(() => {
+      const frame = captureFrame();
+      if (!frame) return;
+      fetch(`${API_BASE}/api/story/v2v-frame`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ frame }),
+      }).catch(() => {});
+    }, 500);
+    return () => {
+      if (v2vFrameIntervalRef.current) clearInterval(v2vFrameIntervalRef.current);
+    };
+  }, [phase, active, v2vEnabled, cameraReady]);
+
+  // ── Auto-play Veo clips when ready for current scene ──
+  useEffect(() => {
+    const clip = videoClips.get(currentScene);
+    if (clip && storyVideoRef.current && !playingVideo) {
+      storyVideoRef.current.src = clip.videoUrl;
+      storyVideoRef.current.play()
+        .then(() => {
+          setPlayingVideo(true);
+          setVideoMode('veo');
+        })
+        .catch(() => {});
+    }
+  }, [currentScene, videoClips, playingVideo]);
 
   // ── Emotion polling fallback (Gemini, when Overshoot not connected) ──
   useEffect(() => {
@@ -617,6 +676,16 @@ export default function BedtimeStoryView() {
         return;
       }
 
+      // Capture LiveKit room info from start response
+      if ((data as any).livekit) {
+        setLivekitRoom((data as any).livekit);
+      }
+      // Auto-enable V2V if backend says it's configured
+      if ((data as any).v2vEnabled) {
+        setV2vEnabled(true);
+        setVideoMode('v2v');
+      }
+
       setActive(true);
       setPhase('playing');
 
@@ -635,6 +704,12 @@ export default function BedtimeStoryView() {
       await fetch(`${API_BASE}/api/story/stop`, { method: 'POST' });
     } catch { /* silent */ }
     setActive(false);
+    setV2vEnabled(false);
+    setV2vFrame(null);
+    setVideoClips(new Map());
+    setPlayingVideo(false);
+    setVideoMode('static');
+    setLivekitRoom(null);
   }
 
   // ── Fire a story beat ──
@@ -685,6 +760,18 @@ export default function BedtimeStoryView() {
         }).catch(() => {});
       }
 
+      // Handle pre-generated video clip from beat response
+      if (data.videoClip?.videoUrl) {
+        setVideoClips((prev) => {
+          const next = new Map(prev);
+          next.set(data.beatIndex ?? scenes.length, {
+            videoUrl: data.videoClip.videoUrl,
+            durationSeconds: data.videoClip.durationSeconds,
+          });
+          return next;
+        });
+      }
+
       // Add to scenes
       const scene: StoryScene = {
         narration: data.narration || '',
@@ -696,6 +783,9 @@ export default function BedtimeStoryView() {
       setScenes((prev) => {
         const next = [...prev, scene];
         setCurrentScene(next.length - 1);
+        // Reset video mode for new scene
+        setPlayingVideo(false);
+        setVideoMode(v2vEnabled && v2vFrame ? 'v2v' : 'static');
         return next;
       });
     } catch {
@@ -1105,14 +1195,40 @@ export default function BedtimeStoryView() {
         </div>
       )}
 
-      {/* Scene display — full width, video-like */}
+      {/* Scene display — full width, 3-layer video player */}
       <div className="relative rounded-2xl overflow-hidden border-2 border-gold/30 shadow-[0_0_60px_rgba(212,168,83,0.15)] aspect-video bg-midnight-light min-h-[300px]">
-        {/* Scene image */}
+        {/* Layer 1: Veo video clips (z-10 when active) */}
+        <video
+          ref={storyVideoRef}
+          className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-700 ${
+            videoMode === 'veo' ? 'opacity-100 z-10' : 'opacity-0 z-0'
+          }`}
+          playsInline
+          onEnded={() => {
+            setPlayingVideo(false);
+            setVideoMode(v2vEnabled && v2vFrame ? 'v2v' : 'static');
+          }}
+        />
+
+        {/* Layer 2: V2V canvas frames (z-5 when active) */}
+        {v2vFrame && (
+          <img
+            src={v2vFrame}
+            alt="V2V frame"
+            className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-300 ${
+              videoMode === 'v2v' ? 'opacity-100 z-5' : 'opacity-0 z-0'
+            }`}
+          />
+        )}
+
+        {/* Layer 3: Static scene image (fallback) */}
         {sceneImage ? (
           <img
             src={sceneImage}
             alt="Story scene"
-            className="w-full h-full object-cover transition-opacity duration-700"
+            className={`w-full h-full object-cover transition-opacity duration-700 ${
+              videoMode === 'static' ? 'opacity-100' : 'opacity-0'
+            }`}
           />
         ) : (
           <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-b from-midnight-light via-midnight to-midnight-light">
@@ -1135,7 +1251,7 @@ export default function BedtimeStoryView() {
           </div>
         )}
 
-        {/* Top bar: scene number + emotion + people count */}
+        {/* Top bar: scene number + emotion + people count + video mode */}
         <div className="absolute top-0 left-0 right-0 bg-gradient-to-b from-midnight/80 to-transparent p-3 z-10">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -1147,6 +1263,13 @@ export default function BedtimeStoryView() {
               {imageSource && (
                 <span className="bg-black/50 backdrop-blur-sm px-2 py-0.5 rounded text-[10px] font-mono text-gold/90 uppercase">
                   {imageSource === 'imagen_custom' ? 'Personalized' : 'AI'}
+                </span>
+              )}
+              {videoMode !== 'static' && (
+                <span className={`backdrop-blur-sm px-2 py-0.5 rounded text-[10px] font-mono uppercase ${
+                  videoMode === 'veo' ? 'bg-blue-900/50 text-blue-300' : 'bg-purple-900/50 text-purple-300'
+                }`}>
+                  {videoMode === 'veo' ? 'VIDEO' : 'V2V'}
                 </span>
               )}
             </div>
@@ -1181,6 +1304,12 @@ export default function BedtimeStoryView() {
                 <span className="flex items-center gap-1 bg-emerald-900/40 backdrop-blur-sm rounded-full px-2.5 py-0.5">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                   <span className="text-emerald-300 text-xs font-mono">Music</span>
+                </span>
+              )}
+              {livekitRoom && (
+                <span className="flex items-center gap-1 bg-cyan-900/40 backdrop-blur-sm rounded-full px-2.5 py-0.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+                  <span className="text-cyan-300 text-xs font-mono">Live</span>
                 </span>
               )}
             </div>
@@ -1278,6 +1407,25 @@ export default function BedtimeStoryView() {
 
         {/* Right: controls */}
         <div className="flex items-center gap-2 shrink-0">
+          <button
+            onClick={() => {
+              setV2vEnabled(!v2vEnabled);
+              if (!v2vEnabled) {
+                setVideoMode('v2v');
+              } else {
+                setVideoMode('static');
+                setV2vFrame(null);
+              }
+            }}
+            className={`px-3 py-2.5 rounded-xl border text-xs font-mono transition-all ${
+              v2vEnabled
+                ? 'bg-purple-900/20 border-purple-500/30 text-purple-400'
+                : 'bg-[#12121f] border-gold/20 text-parchment/40'
+            }`}
+            title={v2vEnabled ? 'You appear IN the story' : 'Enable V2V to appear in story'}
+          >
+            {v2vEnabled ? 'You: IN' : 'You: OFF'}
+          </button>
           <button
             onClick={() => setAutoAdvance(!autoAdvance)}
             className={`px-3 py-2.5 rounded-xl border text-xs font-mono transition-all ${
