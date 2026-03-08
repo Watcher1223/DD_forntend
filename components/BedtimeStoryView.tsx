@@ -115,6 +115,36 @@ export default function BedtimeStoryView() {
   const [pairData, setPairData] = useState<PairResponse | null>(null);
   const [pairQrUrl, setPairQrUrl] = useState<string | null>(null);
   const [pairCode, setPairCode] = useState<string | null>(null);
+  const [pairLoading, setPairLoading] = useState(false);
+
+  // Fetch a new pair code and QR (fresh code so it won't be expired)
+  async function fetchNewPairCode() {
+    setPairLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/camera/pair`, { method: 'POST' });
+      if (!res.ok) throw new Error('Pair failed');
+      const data = (await res.json()) as PairResponse;
+      setPairData(data);
+      setPairCode(data.pairCode ?? data.code);
+      const u = new URL(data.phoneUrl, 'http://_');
+      const urlForQr = `${PAIR_PHONE_BASE}${u.pathname}${u.search}`;
+      const qr = await QRCode.toDataURL(urlForQr, { width: 256, margin: 2 });
+      setPairQrUrl(qr);
+    } catch {
+      setError('Could not load invite link. Is the backend running?');
+    } finally {
+      setPairLoading(false);
+    }
+  }
+
+  // Open QR modal and generate a fresh code (avoids showing expired code)
+  function openPairModalAndFetch() {
+    setPairModalOpen(true);
+    setPairData(null);
+    setPairQrUrl(null);
+    setPairCode(null);
+    fetchNewPairCode();
+  }
 
   // ── Refs ──
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -149,6 +179,8 @@ export default function BedtimeStoryView() {
   const v2vFrameIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const dollDetectIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoAdvanceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prefetchedBeatRef = useRef<(StoryBeatResponse & { image?: { imageUrl?: string; url?: string; data?: string }; imageUsedYourFace?: boolean }) | null>(null);
+  const prefetchInFlightRef = useRef(false);
 
   // Keep refs in sync
   useEffect(() => { activeRef.current = active; }, [active]);
@@ -525,8 +557,11 @@ export default function BedtimeStoryView() {
         const data = await res.json();
         if (cancelled) return;
         if (data.phoneUrl) {
+          setPairData(data as PairResponse);
           setPairCode((data as PairResponse).pairCode ?? (data as PairResponse).code ?? null);
-          const qrUrl = await QRCode.toDataURL(data.phoneUrl, { width: 192, margin: 1 });
+          const u = new URL(data.phoneUrl, 'http://_');
+          const urlForQr = `${PAIR_PHONE_BASE}${u.pathname}${u.search}`;
+          const qrUrl = await QRCode.toDataURL(urlForQr, { width: 192, margin: 1 });
           if (!cancelled) setPairQrUrl(qrUrl);
         }
       } catch { /* QR pairing optional */ }
@@ -842,10 +877,113 @@ export default function BedtimeStoryView() {
     setLivekitRoom(null);
     setPairQrUrl(null);
     setPairCode(null);
+    prefetchedBeatRef.current = null;
+    prefetchInFlightRef.current = false;
   }
 
   // ── Fire a story beat ──
   const BEAT_TIMEOUT_MS = 55_000; // Backend can take 10–30s for Gemini + image; fail after ~55s
+
+  /** Apply beat response to UI state (scene image, narration, scenes, music). Does not play audio or schedule next. */
+  function applyBeatData(
+    data: StoryBeatResponse & { image?: { imageUrl?: string; url?: string; data?: string }; imageUsedYourFace?: boolean },
+    action: string
+  ) {
+    setNarration(data.narration || '');
+    const rawImageUrl = (data as any).image?.imageUrl ?? (data as any).image?.url ?? (data as any).image?.data;
+    const normalizedImageUrl = rawImageUrl
+      ? (typeof rawImageUrl === 'string' && rawImageUrl.startsWith('data:') ? rawImageUrl : String(rawImageUrl))
+      : null;
+    if (normalizedImageUrl) {
+      setSceneImage(normalizedImageUrl);
+      setImageSource((data as any).image?.source ?? null);
+    }
+    setImageUsedYourFaceLastBeat(
+      typeof (data as any).imageUsedYourFace === 'boolean' ? (data as any).imageUsedYourFace : null
+    );
+    if (data.mood) setMusicMood(data.mood);
+    if (data.language && data.language !== language) {
+      setLanguage(data.language);
+      setDetectedLanguage(data.language);
+    }
+    if (autoAdvanceTimeoutRef.current) {
+      clearTimeout(autoAdvanceTimeoutRef.current);
+      autoAdvanceTimeoutRef.current = null;
+    }
+    if (activeRef.current && (data.theme || data.mood || data.emotion)) {
+      fetch(`${API_BASE}/api/music/update`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          theme: data.theme,
+          mood: data.mood,
+          emotion: data.emotion,
+          intensity: data.intensity,
+        }),
+      }).catch(() => {});
+    }
+    const clip = data.videoClip;
+    if (clip?.videoUrl) {
+      const idx = data.beatIndex ?? scenes.length;
+      setVideoClips((prev) => {
+        const next = new Map(prev);
+        next.set(idx, { videoUrl: clip.videoUrl, durationSeconds: clip.durationSeconds });
+        return next;
+      });
+    }
+    const scene: StoryScene = {
+      narration: data.narration || '',
+      imageUrl: normalizedImageUrl ?? null,
+      audioUrl: data.narrationAudioUrl ?? null,
+      action,
+      timestamp: Date.now(),
+    };
+    setScenes((prev) => {
+      const next = [...prev, scene];
+      setCurrentScene(next.length - 1);
+      setPlayingVideo(false);
+      setVideoMode('static');
+      return next;
+    });
+  }
+
+  /** Request next beat in background and store in prefetchedBeatRef (per VIDEO_RENDERING.md). */
+  function prefetchNextBeat() {
+    if (prefetchInFlightRef.current || !autoAdvanceRef.current || !activeRef.current) return;
+    prefetchInFlightRef.current = true;
+    fetch(`${API_BASE}/api/story/beat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'The story continues...' }),
+    })
+      .then((res) => res.ok ? res.json() : Promise.reject(new Error('Beat failed')))
+      .then((data: StoryBeatResponse) => {
+        if (activeRef.current) prefetchedBeatRef.current = data as any;
+      })
+      .catch(() => {})
+      .finally(() => { prefetchInFlightRef.current = false; });
+  }
+
+  /** When narration ends: use prefetched beat if ready, else request next beat (per VIDEO_RENDERING.md). */
+  function advanceToNext() {
+    if (!autoAdvanceRef.current || !activeRef.current || beatingRef.current) return;
+    const prefetched = prefetchedBeatRef.current;
+    if (prefetched) {
+      prefetchedBeatRef.current = null;
+      applyBeatData(prefetched, 'The story continues...');
+      if (prefetched.narrationAudioUrl) {
+        playNarrationAudio(prefetched.narrationAudioUrl, advanceToNext);
+      } else {
+        autoAdvanceTimeoutRef.current = setTimeout(() => {
+          autoAdvanceTimeoutRef.current = null;
+          advanceToNext();
+        }, AUTO_BEAT_MS);
+      }
+      prefetchNextBeat();
+    } else {
+      fireBeat('The story continues...');
+    }
+  }
 
   async function fireBeat(action: string) {
     if (beatingRef.current) return;
@@ -871,89 +1009,20 @@ export default function BedtimeStoryView() {
         return;
       }
 
-      setNarration(data.narration || '');
-      // Support backend returning imageUrl, url, or base64 in image
-      const rawImageUrl = (data as any).image?.imageUrl ?? (data as any).image?.url ?? (data as any).image?.data;
-      const normalizedImageUrl = rawImageUrl
-        ? (typeof rawImageUrl === 'string' && rawImageUrl.startsWith('data:') ? rawImageUrl : String(rawImageUrl))
-        : null;
-      if (normalizedImageUrl) {
-        setSceneImage(normalizedImageUrl);
-        setImageSource((data as any).image?.source ?? null);
-      }
-      setImageUsedYourFaceLastBeat(
-        typeof (data as any).imageUsedYourFace === 'boolean' ? (data as any).imageUsedYourFace : null
-      );
-      if (data.mood) setMusicMood(data.mood);
+      applyBeatData(data, action);
 
-      // Auto-detect language change from beat response
-      if (data.language && data.language !== language) {
-        setLanguage(data.language);
-        setDetectedLanguage(data.language);
-      }
-
-      // Clear any pending auto-advance timeout (we're handling this beat now)
-      if (autoAdvanceTimeoutRef.current) {
-        clearTimeout(autoAdvanceTimeoutRef.current);
-        autoAdvanceTimeoutRef.current = null;
-      }
-
-      // Play narration audio; when it ends, advance to next beat (movie-style continuous video)
+      // Play narration; when it ends, advance to next (use prefetched beat if ready — VIDEO_RENDERING.md)
       if (data.narrationAudioUrl) {
-        playNarrationAudio(data.narrationAudioUrl, () => {
-          if (autoAdvanceRef.current && activeRef.current && !beatingRef.current) {
-            fireBeat('The story continues...');
-          }
-        });
+        playNarrationAudio(data.narrationAudioUrl, advanceToNext);
       } else if (autoAdvanceRef.current && activeRef.current) {
-        // No TTS: advance after a short delay so the story still flows like a movie
         autoAdvanceTimeoutRef.current = setTimeout(() => {
           autoAdvanceTimeoutRef.current = null;
-          if (activeRef.current && !beatingRef.current) fireBeat('The story continues...');
+          advanceToNext();
         }, AUTO_BEAT_MS);
       }
 
-      // Update music
-      if (activeRef.current && (data.theme || data.mood || data.emotion)) {
-        fetch(`${API_BASE}/api/music/update`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            theme: data.theme,
-            mood: data.mood,
-            emotion: data.emotion,
-            intensity: data.intensity,
-          }),
-        }).catch(() => {});
-      }
-
-      // Handle pre-generated video clip from beat response
-      const clip = data.videoClip;
-      if (clip?.videoUrl) {
-        const idx = data.beatIndex ?? scenes.length;
-        setVideoClips((prev) => {
-          const next = new Map(prev);
-          next.set(idx, { videoUrl: clip.videoUrl, durationSeconds: clip.durationSeconds });
-          return next;
-        });
-      }
-
-      // Add to scenes
-      const scene: StoryScene = {
-        narration: data.narration || '',
-        imageUrl: normalizedImageUrl,
-        audioUrl: data.narrationAudioUrl ?? null,
-        action,
-        timestamp: Date.now(),
-      };
-      setScenes((prev) => {
-        const next = [...prev, scene];
-        setCurrentScene(next.length - 1);
-        // Reset to static for new scene (V2V/Veo will overlay when they have content)
-        setPlayingVideo(false);
-        setVideoMode('static');
-        return next;
-      });
+      // Prefetch next beat so gap between scenes is minimal
+      prefetchNextBeat();
     } catch (err: unknown) {
       clearTimeout(timeoutId);
       const isAbort = err instanceof Error && err.name === 'AbortError';
@@ -1303,22 +1372,7 @@ export default function BedtimeStoryView() {
           </button>
           <button
             type="button"
-            onClick={async () => {
-              setPairModalOpen(true);
-              try {
-                const res = await fetch(`${API_BASE}/api/camera/pair`, { method: 'POST' });
-                if (!res.ok) throw new Error('Pair failed');
-                const data = (await res.json()) as PairResponse;
-                setPairData(data);
-                setPairCode(data.pairCode ?? data.code);
-                const u = new URL(data.phoneUrl, 'http://_');
-                const urlForQr = `${PAIR_PHONE_BASE}${u.pathname}${u.search}`;
-                const qr = await QRCode.toDataURL(urlForQr, { width: 256, margin: 2 });
-                setPairQrUrl(qr);
-              } catch {
-                setError('Could not load invite link. Is the backend running?');
-              }
-            }}
+            onClick={() => openPairModalAndFetch()}
             className="mt-3 block w-full text-center text-parchment/50 hover:text-gold/80 text-sm font-mono transition-colors"
           >
             Invite with phone (show QR code)
@@ -1331,7 +1385,7 @@ export default function BedtimeStoryView() {
             <div className="bg-midnight-light border border-gold/30 rounded-2xl p-6 max-w-sm w-full shadow-xl" onClick={(e) => e.stopPropagation()}>
               <h3 className="font-display text-gold text-lg tracking-wider mb-2">Join with your phone</h3>
               <p className="text-parchment/60 text-xs font-body mb-4">Scan the QR code or enter the code on your phone to join the camera.</p>
-              {!pairData || !pairQrUrl ? (
+              {!pairData || !pairQrUrl || pairLoading ? (
                 <div className="flex flex-col items-center gap-2 py-6">
                   <div className="w-8 h-8 border-2 border-gold/40 border-t-gold rounded-full animate-spin" />
                   <span className="text-parchment/50 text-sm">Loading…</span>
@@ -1340,6 +1394,18 @@ export default function BedtimeStoryView() {
                 <>
                   {pairQrUrl && <img src={pairQrUrl} alt="QR code" className="mx-auto rounded-lg border border-gold/20 mb-4" />}
                   <p className="text-center font-mono text-gold/90 text-lg tracking-widest mb-4">{pairData.code.split('').join(' ')}</p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPairData(null);
+                      setPairQrUrl(null);
+                      setPairCode(null);
+                      fetchNewPairCode();
+                    }}
+                    className="w-full py-2 rounded-xl border border-gold/20 text-gold/80 font-display text-xs tracking-wider hover:bg-gold/10 mb-2"
+                  >
+                    Get new code
+                  </button>
                 </>
               )}
               <button
@@ -1477,17 +1543,24 @@ export default function BedtimeStoryView() {
           }}
         />
 
-        {/* Loading overlay */}
+        {/* Loading overlay: small when previous scene exists, full-screen only for first beat */}
         {isBeating && (
-          <div className="absolute inset-0 bg-midnight/30 flex items-center justify-center z-20">
-            <div className="bg-black/60 backdrop-blur-sm rounded-2xl px-6 py-4 flex flex-col items-center gap-2">
-              <div className="flex items-center gap-2">
-                <div className="w-5 h-5 border-2 border-gold/40 border-t-gold rounded-full animate-spin" />
-                <span className="text-gold text-sm font-display tracking-wider">Creating scene…</span>
-              </div>
-              <p className="text-parchment-dim/60 text-xs font-body">This may take 10–30 seconds</p>
+          sceneImage ? (
+            <div className="absolute bottom-4 right-4 z-20 flex items-center gap-2 bg-black/60 backdrop-blur-sm rounded-xl px-3 py-2 border border-gold/20">
+              <div className="w-4 h-4 border-2 border-gold/40 border-t-gold rounded-full animate-spin" />
+              <span className="text-gold text-xs font-display tracking-wider">Drawing next scene…</span>
             </div>
-          </div>
+          ) : (
+            <div className="absolute inset-0 bg-midnight/30 flex items-center justify-center z-20">
+              <div className="bg-black/60 backdrop-blur-sm rounded-2xl px-6 py-4 flex flex-col items-center gap-2">
+                <div className="flex items-center gap-2">
+                  <div className="w-5 h-5 border-2 border-gold/40 border-t-gold rounded-full animate-spin" />
+                  <span className="text-gold text-sm font-display tracking-wider">Creating scene…</span>
+                </div>
+                <p className="text-parchment-dim/60 text-xs font-body">This may take 10–30 seconds</p>
+              </div>
+            </div>
+          )
         )}
 
         {/* Top bar: scene number + emotion + people count + video mode */}
@@ -1716,36 +1789,23 @@ export default function BedtimeStoryView() {
       {cameraReady && (
         <div className="fixed bottom-4 right-4 z-50 flex flex-col items-end gap-2">
           {/* QR code for phone pairing (auto-generated or via button) */}
-          {pairQrUrl && (
-            <div className="bg-white rounded-lg p-1.5 shadow-lg border border-gold/30">
+          {pairQrUrl ? (
+            <button
+              type="button"
+              onClick={() => openPairModalAndFetch()}
+              className="bg-white rounded-lg p-1.5 shadow-lg border border-gold/30 hover:border-gold/50 transition-colors text-left"
+              title="Tap to get fresh QR code"
+            >
               <img src={pairQrUrl} alt="Scan to join" className="w-24 h-24" />
               <p className="text-[7px] text-center text-gray-500 font-mono mt-0.5">
                 {pairCode ? `Code: ${pairCode}` : 'Scan to join'}
               </p>
-            </div>
-          )}
-          {!pairQrUrl && (
+              <p className="text-[6px] text-center text-gold/60">Tap for new code</p>
+            </button>
+          ) : (
             <button
               type="button"
-              onClick={async () => {
-                setPairModalOpen(true);
-                if (audioContextRef.current?.state === 'suspended') audioContextRef.current.resume();
-                try {
-                  if (!pairData || !pairQrUrl) {
-                    const res = await fetch(`${API_BASE}/api/camera/pair`, { method: 'POST' });
-                    if (!res.ok) throw new Error('Pair failed');
-                    const data = (await res.json()) as PairResponse;
-                    setPairData(data);
-                    setPairCode(data.pairCode ?? data.code);
-                    const u = new URL(data.phoneUrl, 'http://_');
-                    const urlForQr = `${PAIR_PHONE_BASE}${u.pathname}${u.search}`;
-                    const qr = await QRCode.toDataURL(urlForQr, { width: 256, margin: 2 });
-                    setPairQrUrl(qr);
-                  }
-                } catch {
-                  setError('Could not load invite link. Is the backend running?');
-                }
-              }}
+              onClick={() => openPairModalAndFetch()}
               className="rounded-lg border border-gold/30 bg-midnight/90 px-2.5 py-1.5 text-[10px] font-mono text-gold/80 hover:text-gold hover:bg-gold/10 transition-colors"
               title="Show QR code for others to join"
             >
@@ -1779,7 +1839,7 @@ export default function BedtimeStoryView() {
           <div className="bg-midnight-light border border-gold/30 rounded-2xl p-6 max-w-sm w-full shadow-xl" onClick={(e) => e.stopPropagation()}>
             <h3 className="font-display text-gold text-lg tracking-wider mb-2">Join with your phone</h3>
             <p className="text-parchment/60 text-xs font-body mb-4">Scan the QR code or enter the code on your phone to join the camera.</p>
-            {!pairData || !pairQrUrl ? (
+            {!pairData || !pairQrUrl || pairLoading ? (
               <div className="flex flex-col items-center gap-2 py-6">
                 <div className="w-8 h-8 border-2 border-gold/40 border-t-gold rounded-full animate-spin" />
                 <span className="text-parchment/50 text-sm">Loading…</span>
@@ -1788,6 +1848,18 @@ export default function BedtimeStoryView() {
               <>
                 {pairQrUrl && <img src={pairQrUrl} alt="QR code" className="mx-auto rounded-lg border border-gold/20 mb-4" />}
                 <p className="text-center font-mono text-gold/90 text-lg tracking-widest mb-4">{pairData.code.split('').join(' ')}</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPairData(null);
+                    setPairQrUrl(null);
+                    setPairCode(null);
+                    fetchNewPairCode();
+                  }}
+                  className="w-full py-2 rounded-xl border border-gold/20 text-gold/80 font-display text-xs tracking-wider hover:bg-gold/10 mb-2"
+                >
+                  Get new code
+                </button>
               </>
             )}
             <button
