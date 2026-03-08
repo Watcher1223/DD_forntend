@@ -20,3 +20,7 @@ Use it to show “Your face” vs “Generic character” in the UI and to point
 - When the user turns “You: ON” during the story, send one frame to **`POST /api/camera/analyze`** (with the current `campaignId`) so the next beat can use their face.
 
 See [WHY_RANDOM_PEOPLE.md](./WHY_RANDOM_PEOPLE.md) for full conditions and troubleshooting.
+
+## Invite others (QR code)
+
+- **`POST /api/camera/pair`** returns **phoneUrl**; the frontend encodes it in a QR code. The URL must be **reachable from the phone** (not localhost). Use **backend** `PUBLIC_BASE_URL` or **frontend** `NEXT_PUBLIC_PAIR_PHONE_BASE_URL` so the QR opens on the phone. See [INVITE_OTHERS_QR.md](./INVITE_OTHERS_QR.md).

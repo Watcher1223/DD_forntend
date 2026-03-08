@@ -137,6 +137,7 @@ export default function BedtimeStoryView() {
   const micStreamRef = useRef<MediaStream | null>(null);
   const beatingRef = useRef(false);
   const activeRef = useRef(false);
+  const autoAdvanceRef = useRef(true);
   const faceCaptureTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const campaignIdRef = useRef<number | null>(null);
   const overshootWsRef = useRef<WebSocket | null>(null);
@@ -147,12 +148,14 @@ export default function BedtimeStoryView() {
   const isNarrationPlayingRef = useRef(false);
   const v2vFrameIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const dollDetectIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const autoAdvanceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Keep refs in sync
   useEffect(() => { activeRef.current = active; }, [active]);
   useEffect(() => { beatingRef.current = isBeating; }, [isBeating]);
   useEffect(() => { isNarrationPlayingRef.current = isNarrationPlaying; }, [isNarrationPlaying]);
   useEffect(() => { campaignIdRef.current = campaignId; }, [campaignId]);
+  useEffect(() => { autoAdvanceRef.current = autoAdvance; }, [autoAdvance]);
 
   // ── Health check ──
   useEffect(() => {
@@ -607,19 +610,14 @@ export default function BedtimeStoryView() {
     };
   }, [phase, active]);
 
-  // ── Auto-advance beats (video-like) ──
+  // ── Auto-advance beats: when narration ends (movie-style) or after delay if no TTS ──
+  // Cleared when manual beat or when phase/active/autoAdvance change; fallback timeout cleared in fireBeat when we have narration.
   useEffect(() => {
-    if (phase === 'playing' && active && autoAdvance) {
-      autoBeatIntervalRef.current = setInterval(() => {
-        if (!beatingRef.current && activeRef.current) {
-          fireBeat('The story continues...');
-        }
-      }, AUTO_BEAT_MS);
-    }
     return () => {
-      if (autoBeatIntervalRef.current) clearInterval(autoBeatIntervalRef.current);
+      if (autoAdvanceTimeoutRef.current) clearTimeout(autoAdvanceTimeoutRef.current);
+      autoAdvanceTimeoutRef.current = null;
     };
-  }, [phase, active, autoAdvance]);
+  }, []);
 
   // ── Camera helpers ──
   async function startCamera() {
@@ -732,7 +730,7 @@ export default function BedtimeStoryView() {
     source.start(startTime);
   }
 
-  function playNarrationAudio(url: string) {
+  function playNarrationAudio(url: string, onEnded?: () => void) {
     if (narrationAudioRef.current) {
       narrationAudioRef.current.pause();
     }
@@ -740,7 +738,10 @@ export default function BedtimeStoryView() {
     audio.volume = 1.0;
     narrationAudioRef.current = audio;
     setIsNarrationPlaying(true);
-    audio.onended = () => setIsNarrationPlaying(false);
+    audio.onended = () => {
+      setIsNarrationPlaying(false);
+      onEnded?.();
+    };
     audio.onpause = () => setIsNarrationPlaying(false);
     audio.play().catch(() => setIsNarrationPlaying(false));
   }
@@ -850,6 +851,10 @@ export default function BedtimeStoryView() {
     if (beatingRef.current) return;
     setIsBeating(true);
     setError(null);
+    if (autoAdvanceTimeoutRef.current) {
+      clearTimeout(autoAdvanceTimeoutRef.current);
+      autoAdvanceTimeoutRef.current = null;
+    }
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), BEAT_TIMEOUT_MS);
     try {
@@ -887,9 +892,25 @@ export default function BedtimeStoryView() {
         setDetectedLanguage(data.language);
       }
 
-      // Play narration audio
+      // Clear any pending auto-advance timeout (we're handling this beat now)
+      if (autoAdvanceTimeoutRef.current) {
+        clearTimeout(autoAdvanceTimeoutRef.current);
+        autoAdvanceTimeoutRef.current = null;
+      }
+
+      // Play narration audio; when it ends, advance to next beat (movie-style continuous video)
       if (data.narrationAudioUrl) {
-        playNarrationAudio(data.narrationAudioUrl);
+        playNarrationAudio(data.narrationAudioUrl, () => {
+          if (autoAdvanceRef.current && activeRef.current && !beatingRef.current) {
+            fireBeat('The story continues...');
+          }
+        });
+      } else if (autoAdvanceRef.current && activeRef.current) {
+        // No TTS: advance after a short delay so the story still flows like a movie
+        autoAdvanceTimeoutRef.current = setTimeout(() => {
+          autoAdvanceTimeoutRef.current = null;
+          if (activeRef.current && !beatingRef.current) fireBeat('The story continues...');
+        }, AUTO_BEAT_MS);
       }
 
       // Update music
