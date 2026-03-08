@@ -198,13 +198,18 @@ export default function BedtimeStoryView() {
     return () => { ws.close(); wsRef.current = null; };
   }, []);
 
-  // ── Auto-start camera on mount ──
+  // ── Auto-start camera on mount; keep it running into playing phase for mini CAM ──
   useEffect(() => {
     if (phase === 'setup') {
       startCamera();
     }
-    return () => stopCamera();
+    // Do NOT stop camera when switching to playing — mini CAM needs the stream.
   }, [phase]);
+
+  // Stop camera only when component unmounts (user leaves the page).
+  useEffect(() => {
+    return () => stopCamera();
+  }, []);
 
   // ── Auto-detect face once camera is ready + multi-frame capture ──
   useEffect(() => {
@@ -1164,6 +1169,7 @@ export default function BedtimeStoryView() {
           <button
             type="button"
             onClick={async () => {
+              setPairModalOpen(true);
               try {
                 const res = await fetch(`${API_BASE}/api/camera/pair`, { method: 'POST' });
                 if (!res.ok) throw new Error('Pair failed');
@@ -1171,7 +1177,6 @@ export default function BedtimeStoryView() {
                 setPairData(data);
                 const qr = await QRCode.toDataURL(data.phoneUrl, { width: 256, margin: 2 });
                 setPairQrUrl(qr);
-                setPairModalOpen(true);
               } catch {
                 setError('Could not load invite link. Is the backend running?');
               }
@@ -1182,14 +1187,23 @@ export default function BedtimeStoryView() {
           </button>
         </div>
 
-        {/* Pairing modal — QR code for phone join */}
-        {pairModalOpen && pairData && (
+        {/* Pairing modal — QR code for phone join (setup phase) */}
+        {pairModalOpen && (
           <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/70 p-4" onClick={() => setPairModalOpen(false)}>
             <div className="bg-midnight-light border border-gold/30 rounded-2xl p-6 max-w-sm w-full shadow-xl" onClick={(e) => e.stopPropagation()}>
               <h3 className="font-display text-gold text-lg tracking-wider mb-2">Join with your phone</h3>
               <p className="text-parchment/60 text-xs font-body mb-4">Scan the QR code or enter the code on your phone to join the camera.</p>
-              {pairQrUrl && <img src={pairQrUrl} alt="QR code" className="mx-auto rounded-lg border border-gold/20 mb-4" />}
-              <p className="text-center font-mono text-gold/90 text-lg tracking-widest mb-4">{pairData.code.split('').join(' ')}</p>
+              {!pairData || !pairQrUrl ? (
+                <div className="flex flex-col items-center gap-2 py-6">
+                  <div className="w-8 h-8 border-2 border-gold/40 border-t-gold rounded-full animate-spin" />
+                  <span className="text-parchment/50 text-sm">Loading…</span>
+                </div>
+              ) : (
+                <>
+                  {pairQrUrl && <img src={pairQrUrl} alt="QR code" className="mx-auto rounded-lg border border-gold/20 mb-4" />}
+                  <p className="text-center font-mono text-gold/90 text-lg tracking-widest mb-4">{pairData.code.split('').join(' ')}</p>
+                </>
+              )}
               <button
                 type="button"
                 onClick={() => setPairModalOpen(false)}
@@ -1535,9 +1549,34 @@ export default function BedtimeStoryView() {
         </div>
       </div>
 
-      {/* Mini camera preview — fixed bottom-right (live feed) */}
+      {/* Mini camera preview — fixed bottom-right (live feed) + Invite QR */}
       {cameraReady && (
-        <div className="fixed bottom-4 right-4 z-50">
+        <div className="fixed bottom-4 right-4 z-50 flex flex-col items-end gap-2">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={async () => {
+                setPairModalOpen(true);
+                if (audioContextRef.current?.state === 'suspended') audioContextRef.current.resume();
+                try {
+                  if (!pairData || !pairQrUrl) {
+                    const res = await fetch(`${API_BASE}/api/camera/pair`, { method: 'POST' });
+                    if (!res.ok) throw new Error('Pair failed');
+                    const data = (await res.json()) as PairResponse;
+                    setPairData(data);
+                    const qr = await QRCode.toDataURL(data.phoneUrl, { width: 256, margin: 2 });
+                    setPairQrUrl(qr);
+                  }
+                } catch {
+                  setError('Could not load invite link. Is the backend running?');
+                }
+              }}
+              className="rounded-lg border border-gold/30 bg-midnight/90 px-2.5 py-1.5 text-[10px] font-mono text-gold/80 hover:text-gold hover:bg-gold/10 transition-colors"
+              title="Show QR code for others to join"
+            >
+              QR Invite
+            </button>
+          </div>
           <div className="relative w-32 h-24 rounded-xl overflow-hidden border border-gold/30 shadow-lg bg-midnight">
             <video
               ref={setMiniVideoRef}
@@ -1550,6 +1589,34 @@ export default function BedtimeStoryView() {
               <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
               <span className="text-[8px] text-parchment/60 font-mono">CAM</span>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Pairing modal — same as setup phase, so QR works during story */}
+      {pairModalOpen && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/70 p-4" onClick={() => setPairModalOpen(false)}>
+          <div className="bg-midnight-light border border-gold/30 rounded-2xl p-6 max-w-sm w-full shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h3 className="font-display text-gold text-lg tracking-wider mb-2">Join with your phone</h3>
+            <p className="text-parchment/60 text-xs font-body mb-4">Scan the QR code or enter the code on your phone to join the camera.</p>
+            {!pairData || !pairQrUrl ? (
+              <div className="flex flex-col items-center gap-2 py-6">
+                <div className="w-8 h-8 border-2 border-gold/40 border-t-gold rounded-full animate-spin" />
+                <span className="text-parchment/50 text-sm">Loading…</span>
+              </div>
+            ) : (
+              <>
+                {pairQrUrl && <img src={pairQrUrl} alt="QR code" className="mx-auto rounded-lg border border-gold/20 mb-4" />}
+                <p className="text-center font-mono text-gold/90 text-lg tracking-widest mb-4">{pairData.code.split('').join(' ')}</p>
+              </>
+            )}
+            <button
+              type="button"
+              onClick={() => setPairModalOpen(false)}
+              className="w-full py-2.5 rounded-xl border border-gold/30 text-gold font-display text-sm tracking-wider hover:bg-gold/10"
+            >
+              Close
+            </button>
           </div>
         </div>
       )}
