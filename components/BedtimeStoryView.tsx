@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
+import QRCode from 'qrcode';
 import type {
   HealthResponse,
   StoryStatusResponse,
@@ -11,6 +12,7 @@ import type {
   SpeechTranscribeResponse,
   StoryExportResponse,
   StageVisionTickMessage,
+  PairResponse,
 } from '@/lib/api-types';
 import { API_BASE, WS_URL } from '@/lib/config';
 const OVERSHOOT_WS_URL = process.env.NEXT_PUBLIC_OVERSHOOT_WS_URL || '';
@@ -102,6 +104,11 @@ export default function BedtimeStoryView() {
 
   // ── LiveKit state ──
   const [livekitRoom, setLivekitRoom] = useState<{ roomName: string; url: string } | null>(null);
+
+  // ── Pairing / QR (invite with phone) ──
+  const [pairModalOpen, setPairModalOpen] = useState(false);
+  const [pairData, setPairData] = useState<PairResponse | null>(null);
+  const [pairQrUrl, setPairQrUrl] = useState<string | null>(null);
 
   // ── Refs ──
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -432,13 +439,19 @@ export default function BedtimeStoryView() {
   useEffect(() => {
     const clip = videoClips.get(currentScene);
     if (clip && storyVideoRef.current && !playingVideo) {
-      storyVideoRef.current.src = clip.videoUrl;
-      storyVideoRef.current.play()
+      const el = storyVideoRef.current;
+      el.crossOrigin = 'anonymous';
+      el.src = clip.videoUrl;
+      el.load();
+      el.play()
         .then(() => {
           setPlayingVideo(true);
           setVideoMode('veo');
         })
-        .catch(() => {});
+        .catch(() => {
+          // Fallback to static image if video fails (e.g. CORS)
+          setVideoMode('static');
+        });
     }
   }, [currentScene, videoClips, playingVideo]);
 
@@ -538,9 +551,9 @@ export default function BedtimeStoryView() {
   }
 
   function captureFrame(): string | null {
-    if (!videoRef.current || !canvasRef.current) return null;
-    const video = videoRef.current;
-    if (video.videoWidth === 0) return null;
+    // In setup phase the main video is mounted; in playing phase only the mini CAM has the stream.
+    const video = videoRef.current?.videoWidth ? videoRef.current : miniVideoRef.current;
+    if (!video || !canvasRef.current || video.videoWidth === 0) return null;
     const canvas = canvasRef.current;
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
@@ -743,9 +756,14 @@ export default function BedtimeStoryView() {
       }
 
       setNarration(data.narration || '');
-      if (data.image?.imageUrl) {
-        setSceneImage(data.image.imageUrl);
-        setImageSource(data.image.source ?? null);
+      // Support backend returning imageUrl, url, or base64 in image
+      const rawImageUrl = (data as any).image?.imageUrl ?? (data as any).image?.url ?? (data as any).image?.data;
+      const normalizedImageUrl = rawImageUrl
+        ? (typeof rawImageUrl === 'string' && rawImageUrl.startsWith('data:') ? rawImageUrl : String(rawImageUrl))
+        : null;
+      if (normalizedImageUrl) {
+        setSceneImage(normalizedImageUrl);
+        setImageSource((data as any).image?.source ?? null);
       }
       if (data.mood) setMusicMood(data.mood);
 
@@ -788,7 +806,7 @@ export default function BedtimeStoryView() {
       // Add to scenes
       const scene: StoryScene = {
         narration: data.narration || '',
-        imageUrl: data.image?.imageUrl ?? null,
+        imageUrl: normalizedImageUrl,
         audioUrl: data.narrationAudioUrl ?? null,
         action,
         timestamp: Date.now(),
@@ -1143,7 +1161,45 @@ export default function BedtimeStoryView() {
           >
             {isStarting ? 'Starting...' : 'Begin the Story'}
           </button>
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                const res = await fetch(`${API_BASE}/api/camera/pair`, { method: 'POST' });
+                if (!res.ok) throw new Error('Pair failed');
+                const data = (await res.json()) as PairResponse;
+                setPairData(data);
+                const qr = await QRCode.toDataURL(data.phoneUrl, { width: 256, margin: 2 });
+                setPairQrUrl(qr);
+                setPairModalOpen(true);
+              } catch {
+                setError('Could not load invite link. Is the backend running?');
+              }
+            }}
+            className="mt-3 block w-full text-center text-parchment/50 hover:text-gold/80 text-sm font-mono transition-colors"
+          >
+            Invite with phone (show QR code)
+          </button>
         </div>
+
+        {/* Pairing modal — QR code for phone join */}
+        {pairModalOpen && pairData && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/70 p-4" onClick={() => setPairModalOpen(false)}>
+            <div className="bg-midnight-light border border-gold/30 rounded-2xl p-6 max-w-sm w-full shadow-xl" onClick={(e) => e.stopPropagation()}>
+              <h3 className="font-display text-gold text-lg tracking-wider mb-2">Join with your phone</h3>
+              <p className="text-parchment/60 text-xs font-body mb-4">Scan the QR code or enter the code on your phone to join the camera.</p>
+              {pairQrUrl && <img src={pairQrUrl} alt="QR code" className="mx-auto rounded-lg border border-gold/20 mb-4" />}
+              <p className="text-center font-mono text-gold/90 text-lg tracking-widest mb-4">{pairData.code.split('').join(' ')}</p>
+              <button
+                type="button"
+                onClick={() => setPairModalOpen(false)}
+                className="w-full py-2.5 rounded-xl border border-gold/30 text-gold font-display text-sm tracking-wider hover:bg-gold/10"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        )}
 
         <canvas ref={canvasRef} className="hidden" />
       </div>
