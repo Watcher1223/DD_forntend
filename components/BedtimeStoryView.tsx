@@ -864,10 +864,11 @@ export default function BedtimeStoryView() {
       }
 
       // Start music session — pass campaignId so backend uses this campaign's face references for images
-      const body: Record<string, string | number> = {};
+      const body: Record<string, string | number | boolean> = {};
       if (themeInput.trim()) body.themeDescription = themeInput.trim();
       if (language !== 'en') body.language = language;
       if (campaignId != null) body.campaignId = campaignId;
+      body.veoEnabled = true;
 
       const res = await fetch(`${API_BASE}/api/story/start`, {
         method: 'POST',
